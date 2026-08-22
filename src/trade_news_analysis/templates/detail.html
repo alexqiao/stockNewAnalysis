@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ article.title }}{% endblock %}
+{% block content %}
+<article class="detail">
+  <p class="eyebrow">{{ article.source }} · {{ article.published_at or article.fetched_at }}</p>
+  <h1>{{ article.title }}</h1>
+  <p class="lead">{{ article.summary or "无摘要" }}</p>
+  <p><a class="external" href="{{ article.url }}" target="_blank" rel="noopener noreferrer">查看原始来源 ↗</a></p>
+</article>
+
+{% for relation in article.symbols %}
+{% set analysis = relation.analysis %}
+<section class="analysis-panel">
+  <div class="panel-heading">
+    <h2>{{ relation.symbol }} 影响研判</h2>
+    <button class="secondary reanalyze" data-article-id="{{ article.id }}">重新分析</button>
+  </div>
+  {% if analysis and analysis.status == "complete" %}
+  <div class="horizon-grid">
+    {% for horizon in ["1", "5", "20"] %}
+      {% set impact = analysis.impacts[horizon] %}
+      <div class="horizon {{ impact.direction }}">
+        <strong>{{ horizon }} 个交易日</strong>
+        <span>{{ impact.direction }} · {{ "%.0f"|format(impact.confidence * 100) }}%</span>
+        <p>{{ impact.reason }}</p>
+      </div>
+    {% endfor %}
+  </div>
+  <dl class="research-grid">
+    <div><dt>事件类型</dt><dd>{{ analysis.event_type }}</dd></div>
+    <div><dt>信息新颖度</dt><dd>{{ "%.0f"|format(analysis.novelty * 100) }}%</dd></div>
+    <div><dt>可能已定价</dt><dd>{{ "%.0f"|format(analysis.priced_in * 100) }}%</dd></div>
+    <div><dt>财务通道</dt><dd>{{ analysis.financial_channels|join("、") }}</dd></div>
+  </dl>
+  <h3>已发生的需求变化</h3><p>{{ analysis.observed_demand }}</p>
+  <h3>财务传导假设</h3><p>{{ analysis.thesis }}</p>
+  <div class="three-columns">
+    <div><h3>催化剂</h3><ul>{% for item in analysis.catalysts %}<li>{{ item }}</li>{% endfor %}</ul></div>
+    <div><h3>风险</h3><ul>{% for item in analysis.risks %}<li>{{ item }}</li>{% endfor %}</ul></div>
+    <div><h3>证伪条件</h3><ul>{% for item in analysis.falsifiers %}<li>{{ item }}</li>{% endfor %}</ul></div>
+  </div>
+  {% if analysis.outcomes %}
+  <h3>前向验证</h3>
+  <table><thead><tr><th>期限</th><th>预测</th><th>实际</th><th>超额收益</th><th>命中</th></tr></thead>
+    <tbody>{% for item in analysis.outcomes %}<tr><td>{{ item.horizon }}日</td><td>{{ item.predicted_direction }}</td><td>{{ item.actual_direction }}</td><td>{{ "%.2f"|format(item.excess_return_pct) }}%</td><td>{{ "是" if item.correct else "否" }}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% endif %}
+  {% elif analysis %}
+  <div class="notice">分析状态：{{ analysis.status }}{% if analysis.error %} · {{ analysis.error }}{% endif %}</div>
+  {% else %}
+  <div class="notice">这条新闻尚未生成分析。</div>
+  {% endif %}
+</section>
+{% else %}
+<div class="empty">该新闻没有与自选股形成明确关联，因此不会自动生成影响分析。</div>
+{% endfor %}
+{% endblock %}
+{% block scripts %}
+<script>
+document.querySelectorAll('.reanalyze').forEach(button => button.addEventListener('click', async () => {
+  button.disabled = true;
+  const response = await fetch(`/api/v1/news/${button.dataset.articleId}/analyses`, {method: 'POST'});
+  const data = await response.json();
+  button.textContent = response.ok ? '已排队' : (data.detail || '失败');
+}));
+</script>
+{% endblock %}
+

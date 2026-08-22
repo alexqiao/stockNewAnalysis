@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}运行状态 · 金融新闻影响分析{% endblock %}
+{% block content %}
+<section class="page-heading"><p class="eyebrow">SYSTEM HEALTH</p><h1>运行状态</h1></section>
+<div class="metric-grid">
+  <div class="metric"><span>API</span><strong>{{ health.status }}</strong></div>
+  <div class="metric"><span>LLM</span><strong>{{ "已配置" if health.llm_configured else "未配置" }}</strong></div>
+  <div class="metric"><span>定时器</span><strong>{{ "已启用" if health.scheduler_enabled else "已关闭" }}</strong></div>
+  <div class="metric"><span>流水线</span><strong>{{ "运行中" if health.pipeline_busy else "空闲" }}</strong></div>
+</div>
+<section class="analysis-panel">
+  <h2>数据源</h2>
+  <table><thead><tr><th>来源</th><th>最近成功</th><th>本次数量</th><th>连续失败</th><th>错误</th></tr></thead><tbody>
+  {% for source in health.sources %}<tr><td>{{ source.source }}</td><td>{{ source.last_success_at or "—" }}</td><td>{{ source.items_last_run }}</td><td>{{ source.consecutive_failures }}</td><td>{{ source.last_error or "—" }}</td></tr>{% else %}<tr><td colspan="5">尚未运行采集</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+{% endblock %}
+

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}新闻流 · 金融新闻影响分析{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">FORWARD-TESTED NEWS RESEARCH</p>
+    <h1>新闻不是结论，验证才是。</h1>
+    <p>逐条追踪新闻对公司的 1 / 5 / 20 个交易日影响，并用 SPY 超额收益检验。</p>
+  </div>
+  <button id="ingest-button" class="primary">立即采集</button>
+</section>
+
+<form class="filters" method="get">
+  <label>股票
+    <select name="symbol" onchange="this.form.submit()">
+      <option value="">全部</option>
+      {% for item in symbols %}
+      <option value="{{ item }}" {% if selected_symbol == item %}selected{% endif %}>{{ item }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+
+<div id="run-message" class="notice hidden"></div>
+<section class="news-grid">
+  {% for article in articles %}
+  <article class="news-card">
+    <div class="meta">
+      <span>{{ article.source }}</span>
+      <time>{{ article.published_at or article.fetched_at }}</time>
+    </div>
+    <h2><a href="/news/{{ article.id }}">{{ article.title }}</a></h2>
+    <p>{{ article.summary[:260] }}{% if article.summary|length > 260 %}…{% endif %}</p>
+    <div class="signals">
+      {% for relation in article.symbols %}
+        {% set analysis = relation.analysis %}
+        <span class="ticker">{{ relation.symbol }}</span>
+        {% if analysis and analysis.status == "complete" %}
+          {% set impact = analysis.impacts["5"] %}
+          <span class="direction {{ impact.direction }}">5日 {{ impact.direction }} · {{ "%.0f"|format(impact.confidence * 100) }}%</span>
+        {% elif analysis %}
+          <span class="direction pending">{{ analysis.status }}</span>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </article>
+  {% else %}
+  <div class="empty">尚无新闻。点击“立即采集”开始建立前向验证样本。</div>
+  {% endfor %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('ingest-button').addEventListener('click', async () => {
+  const button = document.getElementById('ingest-button');
+  const message = document.getElementById('run-message');
+  button.disabled = true;
+  message.classList.remove('hidden');
+  message.textContent = '正在创建采集任务…';
+  try {
+    const response = await fetch('/api/v1/runs/ingest', {method: 'POST'});
+    const data = await response.json();
+    message.textContent = response.ok ? `任务 #${data.id} 已排队，请稍后刷新。` : (data.detail || '启动失败');
+  } catch (error) {
+    message.textContent = `启动失败：${error}`;
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+{% endblock %}
+

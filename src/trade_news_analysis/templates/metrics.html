@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}验证看板 · 金融新闻影响分析{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <p class="eyebrow">EVIDENCE, NOT VIBES</p>
+  <h1>前向验证看板{% if symbol %} · {{ symbol }}{% endif %}</h1>
+</section>
+<div class="metric-grid">
+  <div class="metric"><span>样本量</span><strong>{{ metrics.sample_size }}</strong></div>
+  <div class="metric"><span>三分类准确率</span><strong>{% if metrics.accuracy is not none %}{{ "%.1f"|format(metrics.accuracy * 100) }}%{% else %}—{% endif %}</strong></div>
+  <div class="metric"><span>平均 SPY 超额收益</span><strong>{% if metrics.average_excess_return_pct is not none %}{{ "%.2f"|format(metrics.average_excess_return_pct) }}%{% else %}—{% endif %}</strong></div>
+  <div class="metric"><span>证据状态</span><strong>{{ "可评估" if metrics.evidence == "sufficient" else "证据不足" }}</strong></div>
+</div>
+{% if metrics.evidence == "insufficient" %}<div class="notice">样本少于 30 条，当前指标仅作记录，不应视为存在稳定优势。</div>{% endif %}
+<section class="analysis-panel">
+  <h2>按模型置信度</h2>
+  <table><thead><tr><th>置信度</th><th>样本量</th><th>准确率</th></tr></thead><tbody>
+    {% for label, bucket in metrics.confidence_buckets.items() %}
+    <tr><td>{{ label }}</td><td>{{ bucket.sample_size }}</td><td>{% if bucket.accuracy is not none %}{{ "%.1f"|format(bucket.accuracy * 100) }}%{% else %}—{% endif %}</td></tr>
+    {% endfor %}
+  </tbody></table>
+</section>
+{% endblock %}
+

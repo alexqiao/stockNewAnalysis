@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}自选股 · 金融新闻影响分析{% endblock %}
+{% block content %}
+<section class="page-heading"><p class="eyebrow">TRACKED UNIVERSE</p><h1>自选股</h1><p>宏观 RSS 只会通过这里配置的完整公司名或明确别名关联股票。</p></section>
+<section class="analysis-panel">
+  <table id="watchlist-table"><thead><tr><th>代码</th><th>公司</th><th>别名</th><th>启用</th><th></th></tr></thead><tbody>
+  {% for item in items %}
+    <tr><td><input value="{{ item.symbol }}" data-field="symbol"></td><td><input value="{{ item.company_name }}" data-field="company_name"></td><td><input value="{{ item.aliases|join(', ') }}" data-field="aliases"></td><td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button class="remove secondary">删除</button></td></tr>
+  {% endfor %}
+  </tbody></table>
+  <div class="actions"><button id="add-row" class="secondary">添加</button><button id="save" class="primary">保存</button><span id="save-message"></span></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const tbody = document.querySelector('#watchlist-table tbody');
+function bindRemove(button) { button.addEventListener('click', () => button.closest('tr').remove()); }
+document.querySelectorAll('.remove').forEach(bindRemove);
+document.getElementById('add-row').addEventListener('click', () => {
+  const row = document.createElement('tr');
+  row.innerHTML = '<td><input data-field="symbol"></td><td><input data-field="company_name"></td><td><input data-field="aliases"></td><td><input type="checkbox" data-field="active" checked></td><td><button class="remove secondary">删除</button></td>';
+  tbody.appendChild(row); bindRemove(row.querySelector('.remove'));
+});
+document.getElementById('save').addEventListener('click', async () => {
+  const items = [...tbody.querySelectorAll('tr')].map(row => ({
+    symbol: row.querySelector('[data-field="symbol"]').value.trim(),
+    company_name: row.querySelector('[data-field="company_name"]').value.trim(),
+    aliases: row.querySelector('[data-field="aliases"]').value.split(',').map(x => x.trim()).filter(Boolean),
+    active: row.querySelector('[data-field="active"]').checked
+  })).filter(item => item.symbol);
+  const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items})});
+  const data = await response.json();
+  document.getElementById('save-message').textContent = response.ok ? `已保存 ${data.length} 个代码` : (data.detail || '保存失败');
+});
+</script>
+{% endblock %}
+
