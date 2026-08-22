@@ -4,7 +4,7 @@ from datetime import UTC
 
 from sqlalchemy.orm import Session
 
-from trade_news_analysis.models import Watchlist
+from trade_news_analysis.models import Security
 from trade_news_analysis.services.normalization import (
     NormalizedArticle,
     match_watchlist,
@@ -69,8 +69,20 @@ def test_feed_requires_title_and_link() -> None:
 
 def test_explicit_entity_matching_is_per_company(session: Session) -> None:
     watchlist = [
-        Watchlist(symbol="AAPL", company_name="Apple Inc.", aliases=["Apple"]),
-        Watchlist(symbol="MSFT", company_name="Microsoft Corporation", aliases=["Microsoft"]),
+        Security(
+            market="US",
+            exchange="NASDAQ",
+            symbol="AAPL",
+            name="Apple Inc.",
+            aliases=["Apple"],
+        ),
+        Security(
+            market="US",
+            exchange="NASDAQ",
+            symbol="MSFT",
+            name="Microsoft Corporation",
+            aliases=["Microsoft"],
+        ),
     ]
     article = NormalizedArticle(
         source="Macro",
@@ -96,3 +108,4 @@ def test_url_and_story_similarity() -> None:
         )
         >= 0.85
     )
+    assert title_similarity("朱雀三号成功完成火箭回收", "朱雀三号成功完成火箭回收！") == 1

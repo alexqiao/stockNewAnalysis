@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trade-news-analysis"
 version = "0.1.0"
-description = "Financial news ingestion, structured stock-impact research, and forward validation"
+description = "Event aggregation, stock-first opportunity research, and forward validation"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -25,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+data = [
+  "akshare>=1.17,<2",
+]
 dev = [
   "httpx>=0.28,<1",
   "mypy>=1.17,<2",
@@ -63,4 +66,3 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 ignore_missing_imports = true
-

@@ -1,37 +1,27 @@
 {% extends "base.html" %}
-{% block title %}自选股 · 金融新闻影响分析{% endblock %}
+{% block title %}自选股 · 股票事件研究{% endblock %}
 {% block content %}
-<section class="page-heading"><p class="eyebrow">TRACKED UNIVERSE</p><h1>自选股</h1><p>宏观 RSS 只会通过这里配置的完整公司名或明确别名关联股票。</p></section>
+<section class="page-heading"><p class="eyebrow">WATCHLIST</p><h1>管理自选股</h1><p class="lead">自选股只影响个人首页，不限制全市场机会发现。</p></section>
 <section class="analysis-panel">
-  <table id="watchlist-table"><thead><tr><th>代码</th><th>公司</th><th>别名</th><th>启用</th><th></th></tr></thead><tbody>
-  {% for item in items %}
-    <tr><td><input value="{{ item.symbol }}" data-field="symbol"></td><td><input value="{{ item.company_name }}" data-field="company_name"></td><td><input value="{{ item.aliases|join(', ') }}" data-field="aliases"></td><td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button class="remove secondary">删除</button></td></tr>
-  {% endfor %}
+  <table id="watchlist-table"><thead><tr><th>证券</th><th>启用</th><th></th></tr></thead><tbody>
+  {% for item in items %}<tr><td><select data-field="security_id">{% for security in securities %}<option value="{{ security.id }}" {% if security.id == item.security_id %}selected{% endif %}>{{ security.market }} · {{ security.symbol }} · {{ security.name }}</option>{% endfor %}</select></td><td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button class="remove secondary">删除</button></td></tr>{% endfor %}
   </tbody></table>
-  <div class="actions"><button id="add-row" class="secondary">添加</button><button id="save" class="primary">保存</button><span id="save-message"></span></div>
+  <div class="actions"><button id="add" class="secondary">添加</button><button id="save" class="primary">保存</button></div>
+  <div id="message" class="notice hidden"></div>
 </section>
+<template id="row-template"><tr><td><select data-field="security_id">{% for security in securities %}<option value="{{ security.id }}">{{ security.market }} · {{ security.symbol }} · {{ security.name }}</option>{% endfor %}</select></td><td><input type="checkbox" data-field="active" checked></td><td><button class="remove secondary">删除</button></td></tr></template>
 {% endblock %}
-{% block scripts %}
-<script>
+{% block scripts %}<script>
 const tbody = document.querySelector('#watchlist-table tbody');
-function bindRemove(button) { button.addEventListener('click', () => button.closest('tr').remove()); }
-document.querySelectorAll('.remove').forEach(bindRemove);
-document.getElementById('add-row').addEventListener('click', () => {
-  const row = document.createElement('tr');
-  row.innerHTML = '<td><input data-field="symbol"></td><td><input data-field="company_name"></td><td><input data-field="aliases"></td><td><input type="checkbox" data-field="active" checked></td><td><button class="remove secondary">删除</button></td>';
-  tbody.appendChild(row); bindRemove(row.querySelector('.remove'));
-});
-document.getElementById('save').addEventListener('click', async () => {
-  const items = [...tbody.querySelectorAll('tr')].map(row => ({
-    symbol: row.querySelector('[data-field="symbol"]').value.trim(),
-    company_name: row.querySelector('[data-field="company_name"]').value.trim(),
-    aliases: row.querySelector('[data-field="aliases"]').value.split(',').map(x => x.trim()).filter(Boolean),
-    active: row.querySelector('[data-field="active"]').checked
-  })).filter(item => item.symbol);
-  const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items})});
-  const data = await response.json();
-  document.getElementById('save-message').textContent = response.ok ? `已保存 ${data.length} 个代码` : (data.detail || '保存失败');
-});
-</script>
-{% endblock %}
-
+function bindRemove(scope) { scope.querySelectorAll('.remove').forEach(function (button) { button.onclick = function () { button.closest('tr').remove(); }; }); }
+bindRemove(document);
+document.getElementById('add').onclick = function () { tbody.appendChild(document.getElementById('row-template').content.cloneNode(true)); bindRemove(tbody.lastElementChild); };
+document.getElementById('save').onclick = async function () {
+  const items = Array.from(tbody.querySelectorAll('tr')).map(function (row) {
+    return {security_id: Number(row.querySelector('[data-field="security_id"]').value), active: row.querySelector('[data-field="active"]').checked};
+  });
+  const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})});
+  const message = document.getElementById('message'); message.classList.remove('hidden');
+  message.textContent = response.ok ? '已保存。' : '保存失败：' + JSON.stringify(await response.json());
+};
+</script>{% endblock %}

@@ -1,58 +1,91 @@
 {% extends "base.html" %}
-{% block title %}新闻流 · 金融新闻影响分析{% endblock %}
 {% block content %}
 <section class="hero">
   <div>
-    <p class="eyebrow">FORWARD-TESTED NEWS RESEARCH</p>
-    <h1>新闻不是结论，验证才是。</h1>
-    <p>逐条追踪新闻对公司的 1 / 5 / 20 个交易日影响，并用 SPY 超额收益检验。</p>
+    <p class="eyebrow">SECURITY FIRST · EVIDENCE BACKED</p>
+    <h1>从事件发现标的，再用证据持续验证</h1>
+    <p class="lead">多篇新闻先聚合为事件，再映射产业链主题和股票。排名衡量需求确定性、财务传导与公司弹性，不代表收益承诺。</p>
   </div>
   <button id="ingest-button" class="primary">立即采集</button>
 </section>
 
+{% if coverage.coverage_warning %}<div class="notice">{{ coverage.coverage_warning }}</div>{% endif %}
+<div id="run-message" class="notice hidden"></div>
+
+<section class="section-heading"><div><p class="eyebrow">OPPORTUNITY DISCOVERY</p><h2>跨市场机会榜</h2></div></section>
 <form class="filters" method="get">
-  <label>股票
-    <select name="symbol" onchange="this.form.submit()">
+  <label>市场
+    <select name="market">
       <option value="">全部</option>
-      {% for item in symbols %}
-      <option value="{{ item }}" {% if selected_symbol == item %}selected{% endif %}>{{ item }}</option>
-      {% endfor %}
+      {% for item in ["A", "HK", "US"] %}<option value="{{ item }}" {% if selected_market == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
     </select>
   </label>
+  <label>主题
+    <select name="theme">
+      <option value="">全部</option>
+      {% for item in themes %}<option value="{{ item.slug }}" {% if selected_theme == item.slug %}selected{% endif %}>{{ item.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>周期
+    <select name="horizon">
+      {% for item in [1, 5, 20] %}<option value="{{ item }}" {% if horizon == item %}selected{% endif %}>{{ item }} 日</option>{% endfor %}
+    </select>
+  </label>
+  <button class="secondary" type="submit">筛选</button>
 </form>
+<section class="analysis-panel">
+  <table>
+    <thead><tr><th>排名</th><th>标的</th><th>市场</th><th>综合分</th><th>方向</th><th>置信度</th><th>冲突度</th></tr></thead>
+    <tbody>
+    {% for item in opportunities %}
+      <tr>
+        <td>{{ item.signal.rank or loop.index }}</td>
+        <td><a href="/securities/{{ item.security.id }}"><strong>{{ item.security.name }}</strong><br><span class="muted">{{ item.security.symbol }}</span></a></td>
+        <td>{{ item.security.market }} · {{ item.security.exchange }}</td>
+        <td><strong>{{ "%.1f"|format(item.signal.score) }}</strong></td>
+        <td><span class="direction {{ item.signal.direction }}">{{ item.signal.direction }}</span></td>
+        <td>{{ "%.0f"|format(item.signal.confidence * 100) }}%</td>
+        <td>{{ "%.0f"|format(item.signal.conflict * 100) }}%</td>
+      </tr>
+    {% else %}<tr><td colspan="7">尚无已验证候选。采集并完成事件分析后会出现在这里。</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
 
-<div id="run-message" class="notice hidden"></div>
-<section class="news-grid">
-  {% for article in articles %}
+<section class="section-heading"><div><p class="eyebrow">WATCHLIST</p><h2>自选股当前研判</h2></div><a href="/watchlist">管理自选股</a></section>
+<div class="card-grid">
+  {% for item in watchlist %}
+  <article class="signal-card">
+    <div class="meta"><span>{{ item.security.market }} · {{ item.security.symbol }}</span><span>{{ horizon }} 日</span></div>
+    <h2><a href="/securities/{{ item.security.id }}">{{ item.security.name }}</a></h2>
+    {% if item.signal %}
+      <div class="score {{ item.signal.direction }}">{{ "%.1f"|format(item.signal.score) }}</div>
+      <p>{{ item.signal.direction }} · 置信度 {{ "%.0f"|format(item.signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(item.signal.conflict * 100) }}%</p>
+    {% else %}<p class="muted">尚无事件证据，不等于没有市场影响。</p>{% endif %}
+  </article>
+  {% endfor %}
+</div>
+
+<section class="section-heading"><div><p class="eyebrow">EVENT EVIDENCE</p><h2>最近事件</h2></div></section>
+<div class="news-grid">
+  {% for event in events %}
   <article class="news-card">
-    <div class="meta">
-      <span>{{ article.source }}</span>
-      <time>{{ article.published_at or article.fetched_at }}</time>
-    </div>
-    <h2><a href="/news/{{ article.id }}">{{ article.title }}</a></h2>
-    <p>{{ article.summary[:260] }}{% if article.summary|length > 260 %}…{% endif %}</p>
+    <div class="meta"><span>{{ event.event_type or "待分类" }}</span><time>{{ event.occurred_at or event.updated_at }}</time></div>
+    <h2><a href="/events/{{ event.id }}">{{ event.title }}</a></h2>
+    <p>{{ event.summary[:240] }}{% if event.summary|length > 240 %}…{% endif %}</p>
     <div class="signals">
-      {% for relation in article.symbols %}
-        {% set analysis = relation.analysis %}
-        <span class="ticker">{{ relation.symbol }}</span>
-        {% if analysis and analysis.status == "complete" %}
-          {% set impact = analysis.impacts["5"] %}
-          <span class="direction {{ impact.direction }}">5日 {{ impact.direction }} · {{ "%.0f"|format(impact.confidence * 100) }}%</span>
-        {% elif analysis %}
-          <span class="direction pending">{{ analysis.status }}</span>
-        {% endif %}
-      {% endfor %}
+      {% for theme in event.themes %}<a class="tag" href="/themes/{{ theme.id }}">{{ theme.name }}</a>{% endfor %}
+      <span class="direction pending">{{ event.articles|length }} 个来源</span>
+      <span class="direction pending">{{ event.impacts|length }} 个候选</span>
     </div>
   </article>
-  {% else %}
-  <div class="empty">尚无新闻。点击“立即采集”开始建立前向验证样本。</div>
-  {% endfor %}
-</section>
+  {% else %}<div class="empty">尚无事件。</div>{% endfor %}
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
-document.getElementById('ingest-button').addEventListener('click', async () => {
-  const button = document.getElementById('ingest-button');
+document.getElementById('ingest-button').addEventListener('click', async function () {
+  const button = this;
   const message = document.getElementById('run-message');
   button.disabled = true;
   message.classList.remove('hidden');
@@ -60,13 +93,23 @@ document.getElementById('ingest-button').addEventListener('click', async () => {
   try {
     const response = await fetch('/api/v1/runs/ingest', {method: 'POST'});
     const data = await response.json();
-    message.textContent = response.ok ? `任务 #${data.id} 已排队，请稍后刷新。` : (data.detail || '启动失败');
+    if (!response.ok) { message.textContent = data.detail || '启动失败'; return; }
+    while (true) {
+      message.textContent = '任务 #' + data.id + ' 正在采集和聚合…';
+      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+      const runResponse = await fetch('/api/v1/runs/' + data.id);
+      const run = await runResponse.json();
+      if (['complete', 'partial', 'failed'].includes(run.status)) {
+        message.textContent = '任务完成：新增 ' + run.articles_new + ' 条新闻，生成/更新 ' + run.analyses_created + ' 个事件。';
+        window.location.reload();
+        return;
+      }
+    }
   } catch (error) {
-    message.textContent = `启动失败：${error}`;
+    message.textContent = '启动失败：' + error;
   } finally {
     button.disabled = false;
   }
 });
 </script>
 {% endblock %}
-

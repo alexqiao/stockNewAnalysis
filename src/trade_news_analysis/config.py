@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,11 @@ DEFAULT_COMPANIES: dict[str, tuple[str, list[str]]] = {
     "TSLA": ("Tesla, Inc.", ["Tesla"]),
 }
 
+DEFAULT_SECURITY_META: dict[str, tuple[str, str, str, str, str]] = {
+    symbol: ("US", "NASDAQ", "USD", "America/New_York", "US")
+    for symbol in DEFAULT_COMPANIES
+}
+
 
 class Settings(BaseSettings):
     """Runtime settings. Secrets are represented as ``SecretStr`` to avoid log leaks."""
@@ -32,6 +38,10 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: SecretStr | None = None
     llm_model: str = "gpt-4o-mini"
+    llm_thinking: Literal["enabled", "disabled"] | None = None
+    tushare_token: SecretStr | None = None
+    tushare_news_enabled: bool = False
+    akshare_enabled: bool = True
     scheduler_enabled: bool = True
     ingest_interval_minutes: int = Field(default=30, ge=5, le=1440)
     request_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
@@ -39,6 +49,10 @@ class Settings(BaseSettings):
     app_timezone: str = "America/New_York"
     seed_watchlist: str = DEFAULT_WATCHLIST
     http_user_agent: str = "tradeNewsAnalysis/0.1 local-research"
+
+    @property
+    def tushare_configured(self) -> bool:
+        return bool(self.tushare_token and self.tushare_token.get_secret_value().strip())
 
     @property
     def llm_configured(self) -> bool:

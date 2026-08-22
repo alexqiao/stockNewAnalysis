@@ -10,18 +10,20 @@ from fastapi.testclient import TestClient
 from trade_news_analysis.config import Settings
 from trade_news_analysis.db import SessionFactory
 from trade_news_analysis.main import create_app
-from trade_news_analysis.models import Watchlist
-from trade_news_analysis.services.analysis import ImpactAnalyzer
+from trade_news_analysis.models import Security
+from trade_news_analysis.services.analysis import EventAnalyzer
 from trade_news_analysis.services.coordinator import PipelineCoordinator
 from trade_news_analysis.services.evaluation import OutcomeEvaluator
 from trade_news_analysis.services.normalization import NormalizedArticle
 from trade_news_analysis.services.sources import NewsSource, SourceResult
 
-from .test_analysis import VALID_PAYLOAD
+from .test_analysis import VALID_EVENT_PAYLOAD, VALID_IMPACT_PAYLOAD
 
 
 class APIFakeSource:
     name = "api-fake"
+    markets: tuple[str, ...] = ("A", "HK", "US")
+    coverage = "broad"
 
     def fetch(self) -> SourceResult:
         return SourceResult(
@@ -33,27 +35,37 @@ class APIFakeSource:
                     summary="Enterprise customers started paying.",
                     url="https://example.com/api-story",
                     published_at=datetime(2026, 8, 20, 12, tzinfo=UTC),
-                    hinted_symbols={"AAPL"},
                 )
             ],
         )
 
 
-def api_sources(_watchlist: list[Watchlist], _settings: Settings) -> list[NewsSource]:
+class EmptyProvider:
+    name = "empty"
+
+    def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def benchmark_history(self, market: str, period: str = "6mo") -> pd.DataFrame:
+        return pd.DataFrame()
+
+
+def api_sources(_securities: list[Security], _settings: Settings) -> list[NewsSource]:
     return [APIFakeSource()]
 
 
+def completion(_system: str, prompt: str) -> str:
+    payload = VALID_EVENT_PAYLOAD if "canonical_title" in prompt else VALID_IMPACT_PAYLOAD
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> None:
-    analyzer = ImpactAnalyzer(
-        settings, completion=lambda _system, _prompt: json.dumps(VALID_PAYLOAD, ensure_ascii=False)
-    )
-    evaluator = OutcomeEvaluator(lambda _symbol: pd.DataFrame())
     coordinator = PipelineCoordinator(
         session_factory,
         settings,
         source_factory=api_sources,
-        analyzer=analyzer,
-        evaluator=evaluator,
+        analyzer=EventAnalyzer(settings, completion=completion),
+        evaluator=OutcomeEvaluator(provider=EmptyProvider()),
     )
     app = create_app(settings, session_factory, coordinator)
     with TestClient(app) as client:
@@ -68,31 +80,54 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
         assert run["status"] == "complete"
 
         for _ in range(100):
-            news = client.get("/api/v1/news?symbol=AAPL").json()
-            analysis = news[0]["symbols"][0]["analysis"]
-            if analysis["status"] == "complete":
+            opportunities = client.get("/api/v1/opportunities?horizon=5").json()
+            if opportunities:
                 break
             time.sleep(0.01)
-        assert analysis["impacts"]["5"]["direction"] == "bullish"
-        assert client.get("/").status_code == 200
-        assert "新闻不是结论" in client.get("/").text
+        assert opportunities[0]["security"]["symbol"] == "AAPL"
+        assert opportunities[0]["signal"]["direction"] == "bullish"
+
+        news = client.get("/api/v1/news?symbol=AAPL").json()
+        assert news[0]["events"][0]["securities"][0]["symbol"] == "AAPL"
+        event_id = news[0]["events"][0]["id"]
+        event = client.get(f"/api/v1/events/{event_id}").json()
+        assert event["themes"][0]["name"] == "企业软件"
+        assert event["unresolved_candidates"][0]["symbol"] == "FAKE"
+        security_id = opportunities[0]["security"]["id"]
+        assert client.get(f"/api/v1/securities/{security_id}").status_code == 200
+        assert client.get("/api/v1/themes").json()[0]["event_count"] == 1
+
+        dashboard = client.get("/")
+        assert dashboard.status_code == 200
+        assert "从事件发现标的" in dashboard.text
+        assert "Apple Inc." in dashboard.text
+        assert client.get("/api/v1/metrics").status_code == 200
+        assert "前向验证" in client.get("/metrics").text
         assert client.get("/api/v1/health").json()["status"] == "ok"
 
 
-def test_watchlist_validation(session_factory: SessionFactory, settings: Settings) -> None:
+def test_watchlist_uses_security_ids(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
     coordinator = PipelineCoordinator(
         session_factory,
         settings,
         source_factory=api_sources,
-        evaluator=OutcomeEvaluator(lambda _symbol: pd.DataFrame()),
+        evaluator=OutcomeEvaluator(provider=EmptyProvider()),
     )
     app = create_app(settings, session_factory, coordinator)
     with TestClient(app) as client:
-        assert len(client.get("/api/v1/watchlist").json()) == 2
+        items = client.get("/api/v1/watchlist").json()
+        assert len(items) == 2
+        security_id = items[0]["security_id"]
         duplicate = {
             "items": [
-                {"symbol": "AAPL", "company_name": "Apple", "aliases": [], "active": True},
-                {"symbol": "AAPL", "company_name": "Apple", "aliases": [], "active": True},
+                {"security_id": security_id, "active": True},
+                {"security_id": security_id, "active": True},
             ]
         }
         assert client.put("/api/v1/watchlist", json=duplicate).status_code == 422
+        assert client.put(
+            "/api/v1/watchlist",
+            json={"items": [{"security_id": 999999, "active": True}]},
+        ).status_code == 422

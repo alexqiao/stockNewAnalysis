@@ -7,10 +7,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from ..config import Settings
 from ..db import SessionFactory
-from ..models import ImpactAnalysis
-from .analysis import ImpactAnalyzer
+from ..models import Event
+from .analysis import EventAnalyzer
 from .evaluation import OutcomeEvaluator
 from .ingestion import IngestionService, SourceFactory
+from .scoring import rebuild_signal_snapshots
 
 
 class PipelineBusyError(RuntimeError):
@@ -23,15 +24,18 @@ class PipelineCoordinator:
         session_factory: SessionFactory,
         settings: Settings,
         source_factory: SourceFactory | None = None,
-        analyzer: ImpactAnalyzer | None = None,
+        analyzer: EventAnalyzer | None = None,
         evaluator: OutcomeEvaluator | None = None,
     ):
-        kwargs = {"source_factory": source_factory} if source_factory else {}
-        self.ingestion = IngestionService(session_factory, settings, **kwargs)
+        self.ingestion = (
+            IngestionService(session_factory, settings, source_factory=source_factory)
+            if source_factory
+            else IngestionService(session_factory, settings)
+        )
         self.session_factory = session_factory
         self.settings = settings
-        self.analyzer = analyzer or ImpactAnalyzer(settings)
-        self.evaluator = evaluator or OutcomeEvaluator()
+        self.analyzer = analyzer or EventAnalyzer(settings)
+        self.evaluator = evaluator or OutcomeEvaluator(settings=settings)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="news-pipeline")
         self._lock = threading.Lock()
         self._pipeline_future: Future[None] | None = None
@@ -49,16 +53,18 @@ class PipelineCoordinator:
         with self.session_factory() as session:
             if self.settings.auto_analyze:
                 self.analyzer.analyze_pending(session)
+                rebuild_signal_snapshots(session)
             self.evaluator.evaluate(session)
 
-    def submit_analysis(self, analysis_id: int) -> Future[None]:
-        return self.executor.submit(self._execute_analysis, analysis_id)
+    def submit_analysis(self, event_id: int) -> Future[None]:
+        return self.executor.submit(self._execute_analysis, event_id)
 
-    def _execute_analysis(self, analysis_id: int) -> None:
+    def _execute_analysis(self, event_id: int) -> None:
         with self.session_factory() as session:
-            analysis = session.get(ImpactAnalysis, analysis_id)
-            if analysis:
-                self.analyzer.analyze_one(session, analysis)
+            event = session.get(Event, event_id)
+            if event:
+                self.analyzer.analyze_event(session, event)
+                rebuild_signal_snapshots(session)
 
     def submit_evaluation(self) -> Future[int]:
         return self.executor.submit(self._execute_evaluation)

@@ -12,10 +12,11 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from ..models import Watchlist
+from ..models import Security
 
 TRACKING_QUERY_PREFIXES = ("utm_", "guccounter", "soc_src", "soc_trk")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+CJK_RE = re.compile(r"[\u3400-\u9fff]+")
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 STOPWORDS = {
@@ -112,12 +113,16 @@ def normalize_title(title: str) -> str:
 
 
 def title_tokens(title: str) -> set[str]:
-    tokens = TOKEN_RE.findall(clean_text(title).casefold())
-    return {
+    normalized = clean_text(title).casefold()
+    tokens = TOKEN_RE.findall(normalized)
+    result = {
         token[:-1] if len(token) > 4 and token.endswith("s") else token
         for token in tokens
         if token not in STOPWORDS
     }
+    for run in CJK_RE.findall(normalized):
+        result.update(run[index : index + 2] for index in range(max(1, len(run) - 1)))
+    return result
 
 
 def title_similarity(left: str, right: str) -> float:
@@ -203,7 +208,7 @@ def normalize_feed_entry(entry: dict[str, Any], source: str) -> NormalizedArticl
 
 
 def match_watchlist(
-    article: NormalizedArticle, watchlist: list[Watchlist]
+    article: NormalizedArticle, watchlist: list[Security]
 ) -> dict[str, tuple[str, bool]]:
     """Return explicit matches only; short/ambiguous aliases are intentionally ignored."""
     matches: dict[str, tuple[str, bool]] = {
@@ -213,7 +218,7 @@ def match_watchlist(
     title = article.title.casefold()
     haystack = f"{article.title} {article.summary}".casefold()
     for item in watchlist:
-        candidates = [item.symbol, item.company_name, *(item.aliases or [])]
+        candidates = [item.symbol, item.name, *(item.aliases or [])]
         for candidate in candidates:
             candidate = clean_text(candidate)
             if len(candidate) < 4:

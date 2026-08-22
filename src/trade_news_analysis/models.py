@@ -1,4 +1,4 @@
-"""SQLAlchemy persistence models."""
+"""SQLAlchemy persistence models for event-centric market research."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ class Base(DeclarativeBase):
 
 
 class Article(Base):
+    """Raw evidence. Articles are never the primary research conclusion."""
+
     __tablename__ = "articles"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -41,49 +43,145 @@ class Article(Base):
     story_cluster_id: Mapped[str] = mapped_column(String(64), index=True)
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
-    symbols: Mapped[list[ArticleSymbol]] = relationship(
+    event_links: Mapped[list[EventArticle]] = relationship(
         back_populates="article", cascade="all, delete-orphan"
     )
 
 
-class ArticleSymbol(Base):
-    __tablename__ = "article_symbols"
-    __table_args__ = (UniqueConstraint("article_id", "symbol", name="uq_article_symbol"),)
+class Security(Base):
+    """A market-qualified security; a bare ticker is never globally unique."""
+
+    __tablename__ = "securities"
+    __table_args__ = (
+        UniqueConstraint("market", "exchange", "symbol", name="uq_security_identity"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    market: Mapped[str] = mapped_column(String(8), index=True)
+    exchange: Mapped[str] = mapped_column(String(20), index=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    industry: Mapped[str] = mapped_column(String(160), default="", index=True)
+    business_summary: Mapped[str] = mapped_column(Text, default="")
+    market_cap: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    timezone: Mapped[str] = mapped_column(String(64), default="America/New_York")
+    calendar: Mapped[str] = mapped_column(String(32), default="US")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    provider_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    impacts: Mapped[list[EventSecurityImpact]] = relationship(
+        back_populates="security", cascade="all, delete-orphan"
+    )
+    snapshots: Mapped[list[SecuritySignalSnapshot]] = relationship(
+        back_populates="security", cascade="all, delete-orphan"
+    )
+    watchlist_entry: Mapped[Watchlist | None] = relationship(
+        back_populates="security", cascade="all, delete-orphan"
+    )
+
+
+class Event(Base):
+    """A canonical market event backed by one or more articles."""
+
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    event_type: Mapped[str] = mapped_column(String(80), default="")
+    observed_demand: Mapped[str] = mapped_column(Text, default="")
+    unresolved_candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    model: Mapped[str] = mapped_column(String(120), default="")
+    raw_response: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    article_links: Mapped[list[EventArticle]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+    theme_links: Mapped[list[EventTheme]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+    impacts: Mapped[list[EventSecurityImpact]] = relationship(
+        back_populates="event", cascade="all, delete-orphan"
+    )
+
+
+class EventArticle(Base):
+    __tablename__ = "event_articles"
+    __table_args__ = (UniqueConstraint("event_id", "article_id", name="uq_event_article"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     article_id: Mapped[int] = mapped_column(
         ForeignKey("articles.id", ondelete="CASCADE"), index=True
     )
-    symbol: Mapped[str] = mapped_column(String(20), index=True)
-    match_method: Mapped[str] = mapped_column(String(30), default="source_query")
-    in_title: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    article: Mapped[Article] = relationship(back_populates="symbols")
-    analyses: Mapped[list[ImpactAnalysis]] = relationship(
-        back_populates="article_symbol", cascade="all, delete-orphan"
+    event: Mapped[Event] = relationship(back_populates="article_links")
+    article: Mapped[Article] = relationship(back_populates="event_links")
+
+
+class Theme(Base):
+    __tablename__ = "themes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    event_links: Mapped[list[EventTheme]] = relationship(
+        back_populates="theme", cascade="all, delete-orphan"
     )
 
 
-class ImpactAnalysis(Base):
-    __tablename__ = "impact_analyses"
+class EventTheme(Base):
+    __tablename__ = "event_themes"
+    __table_args__ = (UniqueConstraint("event_id", "theme_id", name="uq_event_theme"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    article_symbol_id: Mapped[int] = mapped_column(
-        ForeignKey("article_symbols.id", ondelete="CASCADE"), index=True
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    theme_id: Mapped[int] = mapped_column(ForeignKey("themes.id", ondelete="CASCADE"), index=True)
+
+    event: Mapped[Event] = relationship(back_populates="theme_links")
+    theme: Mapped[Theme] = relationship(back_populates="event_links")
+
+
+class EventSecurityImpact(Base):
+    """A verifiable event-to-security transmission hypothesis."""
+
+    __tablename__ = "event_security_impacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     model: Mapped[str] = mapped_column(String(120), default="")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, index=True
-    )
-    event_type: Mapped[str | None] = mapped_column(String(80))
-    novelty: Mapped[float | None] = mapped_column(Float)
-    priced_in: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    chain_level: Mapped[int] = mapped_column(Integer, default=1)
     impacts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    demand_certainty: Mapped[float] = mapped_column(Float, default=0)
+    transmission_clarity: Mapped[float] = mapped_column(Float, default=0)
+    business_purity: Mapped[float] = mapped_column(Float, default=0)
+    scale_elasticity: Mapped[float] = mapped_column(Float, default=0)
+    market_neglect: Mapped[float] = mapped_column(Float, default=0)
+    novelty_unpriced: Mapped[float] = mapped_column(Float, default=0)
+    evidence_quality: Mapped[float] = mapped_column(Float, default=0)
+    verification_speed: Mapped[float] = mapped_column(Float, default=0)
+    risk_penalty: Mapped[float] = mapped_column(Float, default=0)
+    opportunity_score: Mapped[float] = mapped_column(Float, default=0, index=True)
     financial_channels: Mapped[list[str]] = mapped_column(JSON, default=list)
-    observed_demand: Mapped[str | None] = mapped_column(Text)
-    thesis: Mapped[str | None] = mapped_column(Text)
+    thesis: Mapped[str] = mapped_column(Text, default="")
     catalysts: Mapped[list[str]] = mapped_column(JSON, default=list)
     risks: Mapped[list[str]] = mapped_column(JSON, default=list)
     falsifiers: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -91,21 +189,44 @@ class ImpactAnalysis(Base):
     raw_response: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
 
-    article_symbol: Mapped[ArticleSymbol] = relationship(back_populates="analyses")
-    outcomes: Mapped[list[Outcome]] = relationship(
-        back_populates="analysis", cascade="all, delete-orphan"
+    event: Mapped[Event] = relationship(back_populates="impacts")
+    security: Mapped[Security] = relationship(back_populates="impacts")
+
+
+class SecuritySignalSnapshot(Base):
+    __tablename__ = "security_signal_snapshots"
+    __table_args__ = (
+        UniqueConstraint("security_id", "as_of", "horizon", name="uq_security_snapshot"),
     )
-
-
-class Outcome(Base):
-    __tablename__ = "outcomes"
-    __table_args__ = (UniqueConstraint("analysis_id", "horizon", name="uq_analysis_horizon"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    analysis_id: Mapped[int] = mapped_column(
-        ForeignKey("impact_analyses.id", ondelete="CASCADE"), index=True
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.id", ondelete="CASCADE"), index=True
     )
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     horizon: Mapped[int] = mapped_column(Integer, index=True)
+    score: Mapped[float] = mapped_column(Float, default=0, index=True)
+    direction: Mapped[str] = mapped_column(String(10), default="neutral", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    conflict: Mapped[float] = mapped_column(Float, default=0)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    evidence_event_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    components: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    security: Mapped[Security] = relationship(back_populates="snapshots")
+    outcome: Mapped[SignalOutcome | None] = relationship(
+        back_populates="snapshot", cascade="all, delete-orphan"
+    )
+
+
+class SignalOutcome(Base):
+    __tablename__ = "signal_outcomes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("security_signal_snapshots.id", ondelete="CASCADE"), unique=True, index=True
+    )
     baseline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     entry_price: Mapped[float] = mapped_column(Float)
@@ -118,20 +239,23 @@ class Outcome(Base):
     predicted_direction: Mapped[str] = mapped_column(String(10))
     actual_direction: Mapped[str] = mapped_column(String(10))
     correct: Mapped[bool] = mapped_column(Boolean)
+    limit_up_hit: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-    analysis: Mapped[ImpactAnalysis] = relationship(back_populates="outcomes")
+    snapshot: Mapped[SecuritySignalSnapshot] = relationship(back_populates="outcome")
 
 
 class Watchlist(Base):
     __tablename__ = "watchlist"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    company_name: Mapped[str] = mapped_column(String(160), default="")
-    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.id", ondelete="CASCADE"), unique=True, index=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    security: Mapped[Security] = relationship(back_populates="watchlist_entry")
 
 
 class IngestionRun(Base):
@@ -153,6 +277,9 @@ class SourceHealth(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    capability: Mapped[str] = mapped_column(String(40), default="news")
+    markets: Mapped[list[str]] = mapped_column(JSON, default=list)
+    coverage: Mapped[str] = mapped_column(String(20), default="partial")
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)

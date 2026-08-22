@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ event.title }} · 股票事件研究{% endblock %}
+{% block content %}
+<section class="detail">
+  <p class="eyebrow">{{ event.event_type or "待分类" }} · {{ event.occurred_at or event.updated_at }}</p>
+  <div class="panel-heading"><h1>{{ event.title }}</h1><button id="reanalyze" class="secondary" data-event-id="{{ event.id }}">重新分析</button></div>
+  <p class="lead">{{ event.summary }}</p>
+  <h3>已发生的需求变化</h3><p>{{ event.observed_demand or "尚未形成可靠判断。" }}</p>
+  <div class="signals">{% for theme in event.themes %}<a class="tag" href="/themes/{{ theme.id }}">{{ theme.name }}</a>{% endfor %}</div>
+</section>
+<section class="analysis-panel">
+  <h2>高弹性候选</h2>
+  {% for impact in event.impacts %}
+  <article class="candidate-card">
+    <div class="panel-heading"><h3><a href="/securities/{{ impact.security.id }}">{{ impact.security.name }} · {{ impact.security.symbol }}</a></h3><span class="score compact">{{ "%.1f"|format(impact.opportunity_score) }}</span></div>
+    <p>{{ impact.thesis }}</p>
+    <dl class="research-grid">
+      <div><dt>需求确定性</dt><dd>{{ impact.dimensions.demand_certainty }}/5</dd></div>
+      <div><dt>传导清晰度</dt><dd>{{ impact.dimensions.transmission_clarity }}/5</dd></div>
+      <div><dt>业务纯度</dt><dd>{{ impact.dimensions.business_purity }}/5</dd></div>
+      <div><dt>规模弹性</dt><dd>{{ impact.dimensions.scale_elasticity }}/5</dd></div>
+    </dl>
+    <div class="three-columns"><div><h3>催化剂</h3><ul>{% for value in impact.catalysts %}<li>{{ value }}</li>{% endfor %}</ul></div><div><h3>风险</h3><ul>{% for value in impact.risks %}<li>{{ value }}</li>{% endfor %}</ul></div><div><h3>证伪条件</h3><ul>{% for value in impact.falsifiers %}<li>{{ value }}</li>{% endfor %}</ul></div></div>
+  </article>
+  {% else %}<div class="empty">尚无与证券主数据唯一匹配的候选。</div>{% endfor %}
+</section>
+{% if event.unresolved_candidates %}<section class="analysis-panel"><h2>待核实候选</h2><p class="muted">以下公司未能与证券主数据唯一匹配，不参与排名。</p><ul>{% for item in event.unresolved_candidates %}<li>{{ item.name }}{% if item.symbol %} · {{ item.symbol }}{% endif %}：{{ item.supply_chain_role }}</li>{% endfor %}</ul></section>{% endif %}
+<section class="analysis-panel"><h2>原始证据</h2><ul>{% for article in event.articles %}<li><a href="/news/{{ article.id }}">{{ article.title }}</a> · {{ article.source }}</li>{% endfor %}</ul></section>
+{% endblock %}
+{% block scripts %}<script>
+document.getElementById('reanalyze').addEventListener('click', async function () {
+  this.disabled = true;
+  const response = await fetch('/api/v1/events/' + this.dataset.eventId + '/analyses', {method: 'POST'});
+  this.textContent = response.ok ? '已排队' : '失败';
+});
+</script>{% endblock %}

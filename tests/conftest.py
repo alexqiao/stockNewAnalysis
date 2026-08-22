@@ -22,6 +22,10 @@ def settings(tmp_path: Path) -> Settings:
         scheduler_enabled=False,
         seed_watchlist="AAPL,MSFT",
         auto_analyze=True,
+        llm_api_key=None,
+        tushare_token=None,
+        tushare_news_enabled=False,
+        akshare_enabled=False,
     )
 
 

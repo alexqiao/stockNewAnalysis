@@ -8,8 +8,8 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from .config import DEFAULT_COMPANIES, Settings
-from .models import Base, Watchlist
+from .config import DEFAULT_COMPANIES, DEFAULT_SECURITY_META, Settings
+from .models import Base, Security, Watchlist
 
 SessionFactory = sessionmaker[Session]
 
@@ -32,11 +32,29 @@ def initialize_database(engine: Engine, settings: Settings) -> None:
     Base.metadata.create_all(engine)
     factory = build_session_factory(engine)
     with factory() as session:
-        existing = set(session.scalars(select(Watchlist.symbol)).all())
         for symbol in settings.seed_symbols:
-            if symbol not in existing:
-                name, aliases = DEFAULT_COMPANIES.get(symbol, ("", []))
-                session.add(Watchlist(symbol=symbol, company_name=name, aliases=aliases))
+            security = session.scalar(
+                select(Security).where(Security.market == "US", Security.symbol == symbol)
+            )
+            if security is None:
+                name, aliases = DEFAULT_COMPANIES.get(symbol, (symbol, []))
+                market, exchange, currency, timezone, calendar = DEFAULT_SECURITY_META.get(
+                    symbol, ("US", "UNKNOWN", "USD", "America/New_York", "US")
+                )
+                security = Security(
+                    market=market,
+                    exchange=exchange,
+                    symbol=symbol,
+                    name=name,
+                    aliases=aliases,
+                    currency=currency,
+                    timezone=timezone,
+                    calendar=calendar,
+                )
+                session.add(security)
+                session.flush()
+            if not session.scalar(select(Watchlist).where(Watchlist.security_id == security.id)):
+                session.add(Watchlist(security_id=security.id))
         session.commit()
 
 

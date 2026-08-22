@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}金融新闻影响分析{% endblock %}</title>
+  <title>{% block title %}股票事件研究{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">金融新闻影响分析</a>
+    <a class="brand" href="/">股票事件研究</a>
     <nav>
-      <a href="/">新闻流</a>
+      <a href="/">机会与标的</a>
       <a href="/metrics">验证看板</a>
       <a href="/watchlist">自选股</a>
       <a href="/status">运行状态</a>
@@ -20,8 +20,7 @@
   <main class="container">
     {% block content %}{% endblock %}
   </main>
-  <footer>仅供研究与教育使用，不构成投资建议。</footer>
+  <footer>新闻是证据，不是结论。仅供研究与教育使用，不构成投资建议。</footer>
   {% block scripts %}{% endblock %}
 </body>
 </html>
-

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ theme.name }} · 股票事件研究{% endblock %}
+{% block content %}
+<section class="page-heading"><p class="eyebrow">THEME VALUE CHAIN</p><h1>{{ theme.name }}</h1><p class="lead">{{ theme.description or "由市场事件动态形成的产业链主题。" }}</p></section>
+<section class="analysis-panel">
+  <h2>候选股票</h2>
+  <table><thead><tr><th>标的</th><th>市场</th><th>层级</th><th>弹性分</th><th>传导假设</th></tr></thead><tbody>
+  {% for item in theme.candidates %}<tr><td><a href="/securities/{{ item.security.id }}"><strong>{{ item.security.name }}</strong><br>{{ item.security.symbol }}</a></td><td>{{ item.security.market }}</td><td>{{ item.chain_level }} 阶</td><td>{{ "%.1f"|format(item.opportunity_score) }}</td><td>{{ item.thesis }}</td></tr>{% else %}<tr><td colspan="5">尚无已验证候选。</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+<section class="analysis-panel"><h2>相关事件</h2><ul>{% for event in theme.events %}<li><a href="/events/{{ event.id }}">{{ event.title }}</a> · {{ event.occurred_at or "时间未知" }}</li>{% endfor %}</ul></section>
+{% endblock %}

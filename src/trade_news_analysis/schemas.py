@@ -1,4 +1,4 @@
-"""Validated API and LLM data contracts."""
+"""Validated API and two-stage LLM data contracts."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Direction = Literal["bullish", "neutral", "bearish"]
+Market = Literal["A", "HK", "US"]
 
 
 class HorizonImpact(BaseModel):
@@ -16,13 +17,34 @@ class HorizonImpact(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
-class ImpactPayload(BaseModel):
+class CandidateCompany(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    symbol: str | None = Field(default=None, max_length=24)
+    market: Market | None = None
+    supply_chain_role: str = Field(min_length=1, max_length=300)
+    chain_level: int = Field(default=1, ge=1, le=3)
+
+
+class EventPayload(BaseModel):
+    canonical_title: str = Field(min_length=1, max_length=500)
     event_type: str = Field(min_length=1, max_length=80)
-    novelty: float = Field(ge=0, le=1)
-    priced_in: float = Field(ge=0, le=1)
-    impacts: dict[Literal["1", "5", "20"], HorizonImpact]
-    financial_channels: list[str] = Field(max_length=8)
     observed_demand: str = Field(min_length=1, max_length=2000)
+    themes: list[str] = Field(min_length=1, max_length=8)
+    candidates: list[CandidateCompany] = Field(max_length=30)
+    evidence: list[str] = Field(max_length=12)
+
+
+class ImpactPayload(BaseModel):
+    impacts: dict[Literal["1", "5", "20"], HorizonImpact]
+    demand_certainty: float = Field(ge=0, le=5)
+    transmission_clarity: float = Field(ge=0, le=5)
+    business_purity: float = Field(ge=0, le=5)
+    scale_elasticity: float = Field(ge=0, le=5)
+    market_neglect: float = Field(ge=0, le=5)
+    novelty_unpriced: float = Field(ge=0, le=5)
+    verification_speed: float = Field(ge=0, le=5)
+    risk_penalty: float = Field(ge=0, le=20)
+    financial_channels: list[str] = Field(max_length=8)
     thesis: str = Field(min_length=1, max_length=3000)
     catalysts: list[str] = Field(max_length=8)
     risks: list[str] = Field(max_length=8)
@@ -39,16 +61,24 @@ class ImpactPayload(BaseModel):
         return value
 
 
-class WatchlistInput(BaseModel):
-    symbol: str = Field(pattern=r"^[A-Za-z0-9.^-]{1,20}$")
-    company_name: str = Field(default="", max_length=160)
+class SecurityInput(BaseModel):
+    market: Market
+    exchange: str = Field(min_length=1, max_length=20)
+    symbol: str = Field(pattern=r"^[A-Za-z0-9.^-]{1,24}$")
+    name: str = Field(min_length=1, max_length=160)
     aliases: list[str] = Field(default_factory=list, max_length=20)
-    active: bool = True
+    industry: str = Field(default="", max_length=160)
+    business_summary: str = Field(default="", max_length=10000)
 
     @field_validator("symbol")
     @classmethod
     def uppercase_symbol(cls, value: str) -> str:
         return value.upper()
+
+
+class WatchlistInput(BaseModel):
+    security_id: int = Field(gt=0)
+    active: bool = True
 
 
 class WatchlistReplace(BaseModel):

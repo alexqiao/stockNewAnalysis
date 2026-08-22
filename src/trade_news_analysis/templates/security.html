@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ security.name }} · 股票事件研究{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <p class="eyebrow">{{ security.market }} · {{ security.exchange }} · {{ security.symbol }}</p>
+  <h1>{{ security.name }}</h1>
+  <p class="lead">{{ security.business_summary or "暂无可靠业务简介；相关弹性评分会因此更保守。" }}</p>
+</section>
+<div class="horizon-grid">
+{% for horizon in [1, 5, 20] %}{% set signal = security.signals[horizon|string] %}
+  <div class="horizon {{ signal.direction if signal else 'neutral' }}">
+    <strong>{{ horizon }} 个交易日</strong>
+    {% if signal %}<span>{{ signal.direction }} · {{ "%.1f"|format(signal.score) }} 分</span><p>置信度 {{ "%.0f"|format(signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(signal.conflict * 100) }}%</p>{% else %}<span>尚无信号</span>{% endif %}
+  </div>
+{% endfor %}
+</div>
+<section class="analysis-panel">
+  <h2>支持与反对事件</h2>
+  {% for impact in security.impacts %}
+  <article class="impact-row">
+    <div><a href="/events/{{ impact.event_id }}"><strong>{{ impact.event_title }}</strong></a><p>{{ impact.thesis }}</p></div>
+    <div><span class="score compact">{{ "%.1f"|format(impact.opportunity_score) }}</span><p>产业链 {{ impact.chain_level }} 阶</p></div>
+  </article>
+  {% else %}<div class="empty">尚无已验证事件影响。</div>{% endfor %}
+</section>
+{% endblock %}
