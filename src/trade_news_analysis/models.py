@@ -81,6 +81,9 @@ class Security(Base):
     watchlist_entry: Mapped[Watchlist | None] = relationship(
         back_populates="security", cascade="all, delete-orphan"
     )
+    pe_analysis_profile: Mapped[PEAnalysisProfile | None] = relationship(
+        back_populates="security", cascade="all, delete-orphan"
+    )
 
 
 class Event(Base):
@@ -253,9 +256,39 @@ class Watchlist(Base):
         ForeignKey("securities.id", ondelete="CASCADE"), unique=True, index=True
     )
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     security: Mapped[Security] = relationship(back_populates="watchlist_entry")
+
+
+class PEAnalysisProfile(Base):
+    __tablename__ = "pe_analysis_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    source_fiscal_year: Mapped[int | None] = mapped_column(Integer)
+    source_price: Mapped[float | None] = mapped_column(Float)
+    source_market_cap: Mapped[float | None] = mapped_column(Float)
+    source_shares_outstanding: Mapped[float | None] = mapped_column(Float)
+    source_revenue: Mapped[float | None] = mapped_column(Float)
+    source_net_income: Mapped[float | None] = mapped_column(Float)
+    fiscal_year_override: Mapped[int | None] = mapped_column(Integer)
+    price_override: Mapped[float | None] = mapped_column(Float)
+    shares_outstanding_override: Mapped[float | None] = mapped_column(Float)
+    revenue_override: Mapped[float | None] = mapped_column(Float)
+    net_income_override: Mapped[float | None] = mapped_column(Float)
+    assumptions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_name: Mapped[str] = mapped_column(String(80), default="investormate/yfinance")
+    source_status: Mapped[str] = mapped_column(String(20), default="uninitialized")
+    source_error: Mapped[str | None] = mapped_column(Text)
+    source_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    security: Mapped[Security] = relationship(back_populates="pe_analysis_profile")
 
 
 class IngestionRun(Base):

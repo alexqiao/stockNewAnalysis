@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
@@ -37,6 +40,17 @@ class SecurityRecord:
     provider_data: dict[str, Any] | None = None
 
 
+@dataclass(slots=True)
+class FundamentalSnapshot:
+    fiscal_year: int | None
+    price: float | None
+    market_cap: float | None
+    shares_outstanding: float | None
+    revenue: float | None
+    net_income: float | None
+    source: str = "investormate/yfinance"
+
+
 class SecurityMasterProvider(Protocol):
     name: str
     markets: tuple[str, ...]
@@ -50,6 +64,17 @@ class MarketDataProvider(Protocol):
     def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame: ...
 
     def benchmark_history(self, market: str, period: str = "6mo") -> pd.DataFrame: ...
+
+
+class FundamentalDataProvider(Protocol):
+    name: str
+
+    def fetch(
+        self,
+        market: str,
+        symbol: str,
+        provider_data: Mapping[str, Any] | None = None,
+    ) -> FundamentalSnapshot: ...
 
 
 class CalendarProvider(Protocol):
@@ -186,14 +211,30 @@ class AkShareSecurityMasterProvider:
         return result
 
 
+def yahoo_symbol(
+    market: str,
+    symbol: str,
+    provider_data: Mapping[str, Any] | None = None,
+) -> str:
+    configured = str((provider_data or {}).get("yahoo_symbol") or "").strip()
+    if configured:
+        return configured
+    normalized = symbol.strip().upper()
+    if market == "HK":
+        match = re.fullmatch(r"(\d{1,5})(?:\.HK)?", normalized)
+        if match:
+            return f"{int(match.group(1)):04d}.HK"
+    if market == "A" and normalized.endswith(".SH"):
+        return f"{normalized.removesuffix('.SH')}.SS"
+    return normalized
+
+
 class YahooMarketDataProvider:
     name = "yfinance"
 
     @staticmethod
     def _symbol(market: str, symbol: str) -> str:
-        if market == "A" and symbol.endswith(".SH"):
-            return f"{symbol.removesuffix('.SH')}.SS"
-        return symbol
+        return yahoo_symbol(market, symbol)
 
     def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
         result = Stock(self._symbol(market, symbol)).history(
@@ -204,6 +245,71 @@ class YahooMarketDataProvider:
     def benchmark_history(self, market: str, period: str = "6mo") -> pd.DataFrame:
         symbol = {"A": "000300.SS", "HK": "^HSI", "US": "SPY"}[market]
         return self.history(market, symbol, period)
+
+
+class InvestorMateFundamentalProvider:
+    name = "investormate/yfinance"
+
+    def fetch(
+        self,
+        market: str,
+        symbol: str,
+        provider_data: Mapping[str, Any] | None = None,
+    ) -> FundamentalSnapshot:
+        stock = Stock(yahoo_symbol(market, symbol, provider_data))
+        info = stock.info or {}
+        statement = stock.income_statement or {}
+        fiscal_year, statement_row = _latest_complete_income_statement(statement)
+        shares = _as_float(info.get("sharesOutstanding"))
+        if shares is None and statement_row:
+            shares = _first_number(
+                statement_row,
+                "Diluted Average Shares",
+                "Basic Average Shares",
+            )
+        return FundamentalSnapshot(
+            fiscal_year=fiscal_year,
+            price=_as_float(stock.price),
+            market_cap=_as_float(stock.market_cap) or _as_float(info.get("marketCap")),
+            shares_outstanding=shares,
+            revenue=_first_number(statement_row, "Total Revenue", "Operating Revenue"),
+            net_income=_first_number(
+                statement_row,
+                "Net Income Common Stockholders",
+                "Net Income",
+            ),
+            source=self.name,
+        )
+
+
+def _latest_complete_income_statement(
+    statement: Mapping[str, Any],
+) -> tuple[int | None, Mapping[str, Any]]:
+    for period in sorted(statement, reverse=True):
+        row = statement.get(period)
+        if not isinstance(row, Mapping):
+            continue
+        revenue = _first_number(row, "Total Revenue", "Operating Revenue")
+        net_income = _first_number(row, "Net Income Common Stockholders", "Net Income")
+        match = re.match(r"(\d{4})", str(period))
+        if match and revenue is not None and net_income is not None:
+            return int(match.group(1)), row
+    return None, {}
+
+
+def _first_number(values: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _as_float(values.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
 
 
 def _price_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -225,3 +331,65 @@ def build_security_master_provider(settings: Settings) -> SecurityMasterProvider
 
 def build_market_data_provider(settings: Settings) -> MarketDataProvider:
     return TushareProvider(settings) if settings.tushare_configured else YahooMarketDataProvider()
+
+
+def lookup_security_record(market: str, value: str) -> SecurityRecord | None:
+    """Verify one explicitly entered ticker through the existing Yahoo adapter."""
+    raw_symbol = value.strip().upper()
+    if market == "HK":
+        match = re.fullmatch(r"(\d{1,5})(?:\.HK)?", raw_symbol)
+        if match is None:
+            return None
+        number = int(match.group(1))
+        symbol = f"{number:05d}.HK"
+        yahoo_symbol = f"{number:04d}.HK"
+        exchange = "HK"
+    elif market == "A":
+        match = re.fullmatch(r"(\d{6})(?:\.(SH|SZ|BJ|SS))?", raw_symbol)
+        if match is None:
+            return None
+        code, suffix = match.groups()
+        inferred_exchange = (
+            "SH"
+            if code.startswith(("5", "6", "9"))
+            else "BJ"
+            if code.startswith(("4", "8"))
+            else "SZ"
+        )
+        exchange = "SH" if suffix in {"SH", "SS"} else suffix or inferred_exchange
+        symbol = f"{code}.{exchange}"
+        yahoo_symbol = f"{code}.SS" if exchange == "SH" else f"{code}.{exchange}"
+    else:
+        if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", raw_symbol) is None:
+            return None
+        symbol = raw_symbol
+        yahoo_symbol = raw_symbol
+        exchange = "US"
+
+    stock = Stock(yahoo_symbol)
+    info = stock.info
+    name = str(info.get("longName") or info.get("shortName") or "").strip()
+    if not name:
+        return None
+    currency, timezone, calendar = {
+        "A": ("CNY", "Asia/Shanghai", "CN"),
+        "HK": ("HKD", "Asia/Hong_Kong", "HK"),
+        "US": ("USD", "America/New_York", "US"),
+    }[market]
+    if market == "US":
+        exchange = str(info.get("exchange") or exchange)[:20]
+    market_cap = info.get("marketCap")
+    return SecurityRecord(
+        market=market,
+        exchange=exchange,
+        symbol=symbol,
+        name=name,
+        aliases=[],
+        industry=str(info.get("industry") or ""),
+        business_summary=str(info.get("longBusinessSummary") or ""),
+        market_cap=float(market_cap) if isinstance(market_cap, (int, float)) else None,
+        currency=str(info.get("currency") or currency),
+        timezone=str(info.get("exchangeTimezoneName") or timezone),
+        calendar=calendar,
+        provider_data={"source": "yfinance", "yahoo_symbol": yahoo_symbol},
+    )

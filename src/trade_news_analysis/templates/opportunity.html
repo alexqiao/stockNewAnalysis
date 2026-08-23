@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ opportunity.name }} · 跨市场机会{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <a class="external" href="{{ opportunity.back_url }}">← 返回跨市场机会榜</a>
+  <p class="eyebrow">{{ opportunity.type }} · {{ opportunity.horizon }} 日趋势</p>
+  <h1>{{ opportunity.name }}</h1>
+  <p class="lead">基于 {{ opportunity.event_total }} 个相关事件、{{ opportunity.evidence_count }} 个内部证据标的聚合。分析用于解释趋势传导，不构成个股推荐。</p>
+  <div class="signals">
+    {% for market in opportunity.markets %}<span class="tag">{{ market }}</span>{% endfor %}
+    <span class="direction {{ opportunity.direction }}">{{ opportunity.direction }}</span>
+  </div>
+</section>
+
+<div class="metric-grid">
+  <div class="metric"><span>综合分</span><strong>{{ "%.1f"|format(opportunity.score) }}</strong></div>
+  <div class="metric"><span>置信度</span><strong>{{ "%.0f"|format(opportunity.confidence * 100) }}%</strong></div>
+  <div class="metric"><span>冲突度</span><strong>{{ "%.0f"|format(opportunity.conflict * 100) }}%</strong></div>
+  <div class="metric"><span>覆盖市场</span><strong>{{ opportunity.markets|join(" · ") }}</strong></div>
+</div>
+
+<section class="analysis-panel">
+  <h2>分析思路</h2>
+  <div class="three-columns">
+    <div><h3>传导假设</h3><ul>{% for value in opportunity.analysis.theses %}<li>{{ value }}</li>{% else %}<li class="muted">暂无可靠传导假设。</li>{% endfor %}</ul></div>
+    <div><h3>催化剂</h3><ul>{% for value in opportunity.analysis.catalysts %}<li>{{ value }}</li>{% else %}<li class="muted">暂无已验证催化剂。</li>{% endfor %}</ul></div>
+    <div><h3>风险</h3><ul>{% for value in opportunity.analysis.risks %}<li>{{ value }}</li>{% else %}<li class="muted">暂无已识别风险。</li>{% endfor %}</ul></div>
+  </div>
+  <div><h3>证伪条件</h3><ul>{% for value in opportunity.analysis.falsifiers %}<li>{{ value }}</li>{% else %}<li class="muted">暂无明确证伪条件。</li>{% endfor %}</ul></div>
+</section>
+
+<section class="analysis-panel">
+  <h2>最可能涉及的股票</h2>
+  <p class="muted">仅显示与本机会证据事件存在已验证影响关系的股票，受益与受损方向合计不超过 5 只。</p>
+  <table>
+    <thead><tr><th>股票</th><th>市场</th><th>方向</th><th>机会相关分</th><th>置信度</th><th>冲突度</th><th>证据事件</th><th>主要传导假设</th></tr></thead>
+    <tbody>
+    {% for item in opportunity.stocks %}
+      <tr>
+        <td><a href="/securities/{{ item.security.id }}"><strong>{{ item.security.name }}</strong><br><span class="muted">{{ item.security.symbol }}</span></a></td>
+        <td>{{ item.security.market }}</td>
+        <td><span class="direction {{ item.direction }}">{{ item.direction }}</span></td>
+        <td><strong>{{ "%.1f"|format(item.score) }}</strong></td>
+        <td>{{ "%.0f"|format(item.confidence * 100) }}%</td>
+        <td>{{ "%.0f"|format(item.conflict * 100) }}%</td>
+        <td>{{ item.evidence_event_count }}</td>
+        <td>{{ item.thesis or "暂无可靠传导假设。" }}</td>
+      </tr>
+    {% else %}<tr><td colspan="8">暂无与该机会存在已验证影响关系的股票。</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="analysis-panel">
+  <h2>机会内容与相关事件</h2>
+  {% for event in opportunity.events %}
+  <article class="candidate-card">
+    <div class="meta"><span>{{ event.event_type or "待分类" }}</span><time>{{ event.occurred_at or event.updated_at }}</time></div>
+    <h3><a href="/events/{{ event.id }}">{{ event.title }}</a></h3>
+    <p>{{ event.summary or "暂无事件摘要。" }}</p>
+    <p><strong>已发生的需求变化：</strong>{{ event.observed_demand or "尚未形成可靠判断。" }}</p>
+    <div class="signals">
+      {% for theme in event.themes %}<span class="tag">{{ theme.name }}</span>{% endfor %}
+      <span class="direction pending">{{ event.articles|length }} 个来源</span>
+    </div>
+  </article>
+  {% else %}<div class="empty">该机会暂时没有可展示的相关事件。</div>{% endfor %}
+  {% if opportunity.event_total > opportunity.events|length %}<p class="muted">仅展示最近 {{ opportunity.events|length }} 个事件，共 {{ opportunity.event_total }} 个。</p>{% endif %}
+</section>
+{% endblock %}

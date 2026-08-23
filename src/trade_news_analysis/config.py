@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -24,6 +25,46 @@ DEFAULT_SECURITY_META: dict[str, tuple[str, str, str, str, str]] = {
     symbol: ("US", "NASDAQ", "USD", "America/New_York", "US")
     for symbol in DEFAULT_COMPANIES
 }
+DEFAULT_INDUSTRIES = {
+    "AAPL": "消费电子",
+    "MSFT": "软件与云计算",
+    "NVDA": "半导体",
+    "AMZN": "互联网零售与云计算",
+    "GOOGL": "互联网服务",
+    "META": "互联网服务",
+    "TSLA": "汽车制造",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityAsset:
+    symbol: str
+    name: str
+    exchange: str
+    aliases: tuple[str, ...]
+    group: str
+    scope: str
+
+
+OPPORTUNITY_ASSETS = (
+    OpportunityAsset(
+        symbol="GLD",
+        name="SPDR Gold Shares",
+        exchange="NYSEARCA",
+        aliases=("Gold", "Gold bullion", "黄金", "黄金ETF"),
+        group="黄金",
+        scope="全球",
+    ),
+    OpportunityAsset(
+        symbol="GOVT",
+        name="iShares U.S. Treasury Bond ETF",
+        exchange="CBOE",
+        aliases=("U.S. Treasuries", "Treasury bonds", "美国国债", "美债"),
+        group="美债",
+        scope="US",
+    ),
+)
+OPPORTUNITY_ASSET_SYMBOLS = frozenset(asset.symbol for asset in OPPORTUNITY_ASSETS)
 
 
 class Settings(BaseSettings):

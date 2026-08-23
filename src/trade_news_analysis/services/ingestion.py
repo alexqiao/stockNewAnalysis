@@ -9,7 +9,7 @@ from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import Settings
+from ..config import OPPORTUNITY_ASSET_SYMBOLS, Settings
 from ..db import SessionFactory
 from ..models import (
     Article,
@@ -94,6 +94,14 @@ class IngestionService:
             )
         )
         if security is None:
+            symbol_matches = session.scalars(
+                select(Security).where(
+                    Security.market == record.market,
+                    Security.symbol == record.symbol,
+                )
+            ).all()
+            security = symbol_matches[0] if len(symbol_matches) == 1 else None
+        if security is None:
             security = Security(
                 market=record.market,
                 exchange=record.exchange,
@@ -103,13 +111,22 @@ class IngestionService:
             session.add(security)
         security.name = record.name
         security.aliases = sorted(set([*(security.aliases or []), *record.aliases]))
-        security.industry = record.industry
+        existing_provider_data = security.provider_data or {}
+        is_research_asset = bool(existing_provider_data.get("research_asset"))
+        security.industry = (
+            security.industry if is_research_asset else record.industry or security.industry
+        )
         security.business_summary = record.business_summary
         security.market_cap = record.market_cap
         security.currency = record.currency
         security.timezone = record.timezone
         security.calendar = record.calendar
-        security.provider_data = record.provider_data or {}
+        research_metadata = {
+            key: existing_provider_data[key]
+            for key in ("research_asset", "opportunity_group", "opportunity_scope")
+            if key in existing_provider_data
+        }
+        security.provider_data = {**(record.provider_data or {}), **research_metadata}
         security.updated_at = utc_now()
         return security
 
@@ -199,6 +216,14 @@ class IngestionService:
                 .where(Watchlist.active.is_(True), Security.active.is_(True))
                 .order_by(Security.market, Security.symbol)
             ).all()
+            research_assets = session.scalars(
+                select(Security).where(
+                    Security.active.is_(True),
+                    Security.market == "US",
+                    Security.symbol.in_(OPPORTUNITY_ASSET_SYMBOLS),
+                )
+            ).all()
+            tracked = list({item.id: item for item in [*tracked, *research_assets]}.values())
             seen = new = 0
             queued_events: set[int] = set()
             for source in self.source_factory(list(tracked), self.settings):

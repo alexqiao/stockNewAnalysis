@@ -14,6 +14,59 @@
   </div>
 {% endfor %}
 </div>
+<section class="analysis-panel" id="pe-analysis">
+  <div class="panel-heading">
+    <div><p class="eyebrow">PE VALUATION</p><h2>四年 PE 估值</h2></div>
+    {% if pe_analysis %}<div class="actions"><button type="button" id="refresh-pe" class="secondary">刷新基础数据</button><button type="button" id="save-pe" class="primary">保存并重算</button></div>{% endif %}
+  </div>
+  {% if not security.watchlisted %}
+    <div class="empty">请先在<a href="/watchlist">自选股管理</a>中加入该证券，再保存估值假设。</div>
+  {% else %}
+    <p class="muted">基础数据来自 {{ pe_analysis.source.name }}；营收增速、净利润增速和 PE 区间由你设定。模型仅供研究，不构成投资建议。</p>
+    <div id="pe-message" class="notice hidden"></div>
+    {% if pe_analysis.warnings %}<div class="notice"><strong>模型检查</strong><ul>{% for warning in pe_analysis.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>{% endif %}
+    <div class="pe-source-grid">
+      <div><span>自动数据状态</span><strong>{{ pe_analysis.source.status }}</strong></div>
+      <div><span>基准财年</span><strong>{{ pe_analysis.effective_inputs.fiscal_year.value or "—" }}</strong></div>
+      <div><span>当前价</span><strong>{% if pe_analysis.effective_inputs.price.value is not none %}{{ "%.2f"|format(pe_analysis.effective_inputs.price.value) }} {{ security.currency }}{% else %}—{% endif %}</strong></div>
+      <div><span>市值（仅展示）</span><strong>{% if pe_analysis.source_data.market_cap is not none %}{{ "%.2f"|format(pe_analysis.source_data.market_cap / 1000000000) }} B{% else %}—{% endif %}</strong></div>
+      <div><span>总股本</span><strong>{% if pe_analysis.effective_inputs.shares_outstanding.value is not none %}{{ "{:,.0f}".format(pe_analysis.effective_inputs.shares_outstanding.value) }}{% else %}—{% endif %}</strong></div>
+      <div><span>最近刷新</span><strong>{{ pe_analysis.source.fetched_at or "尚未刷新" }}</strong></div>
+    </div>
+    <details class="pe-overrides">
+      <summary>人工覆盖基础数据（留空即使用自动值）</summary>
+      <div class="pe-input-grid">
+        <label>基准财年<input data-override="fiscal_year" type="number" min="1900" max="2200" value="{{ pe_analysis.overrides.fiscal_year or '' }}"></label>
+        <label>当前价<input data-override="price" type="number" min="0" step="0.01" value="{{ pe_analysis.overrides.price or '' }}"></label>
+        <label>总股本<input data-override="shares_outstanding" type="number" min="0" step="1" value="{{ pe_analysis.overrides.shares_outstanding or '' }}"></label>
+        <label>基准营收<input data-override="revenue" type="number" min="0" step="1" value="{{ pe_analysis.overrides.revenue or '' }}"></label>
+        <label>基准净利润<input data-override="net_income" type="number" step="1" value="{{ pe_analysis.overrides.net_income if pe_analysis.overrides.net_income is not none else '' }}"></label>
+      </div>
+      <button type="button" id="clear-pe-overrides" class="secondary">清除全部人工覆盖</button>
+    </details>
+    <div class="table-scroll">
+      <table id="pe-table">
+        <thead><tr><th>年度</th><th>营收增速</th><th>营收</th><th>净利润增速</th><th>净利润</th><th>净利率</th><th>EPS</th><th>PE Low</th><th>PE High</th><th>目标价 Low</th><th>目标价 High</th><th>CAGR Low</th><th>CAGR High</th></tr></thead>
+        <tbody>{% for row in pe_analysis.forecast %}<tr data-year-offset="{{ row.year_offset }}">
+          <td><strong>{{ row.year or ("第 " ~ row.year_offset ~ " 年") }}</strong></td>
+          <td><input data-assumption="revenue_growth" type="number" min="-99.99" step="0.1" value="{% if row.revenue_growth is not none %}{{ '%.2f'|format(row.revenue_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
+          <td>{% if row.revenue is not none %}{{ "{:,.0f}".format(row.revenue) }}{% else %}—{% endif %}</td>
+          <td><input data-assumption="net_income_growth" type="number" min="-99.99" step="0.1" value="{% if row.net_income_growth is not none %}{{ '%.2f'|format(row.net_income_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
+          <td>{% if row.net_income is not none %}{{ "{:,.0f}".format(row.net_income) }}{% else %}—{% endif %}</td>
+          <td>{% if row.net_margin is not none %}{{ "%.1f"|format(row.net_margin * 100) }}%{% else %}—{% endif %}</td>
+          <td>{% if row.eps is not none %}{{ "%.2f"|format(row.eps) }}{% else %}—{% endif %}</td>
+          <td><input data-assumption="pe_low" type="number" min="0.01" step="0.1" value="{{ row.pe_low }}"></td>
+          <td><input data-assumption="pe_high" type="number" min="0.01" step="0.1" value="{{ row.pe_high }}"></td>
+          <td>{% if row.price_low is not none %}{{ "%.2f"|format(row.price_low) }}{% else %}—{% endif %}</td>
+          <td>{% if row.price_high is not none %}{{ "%.2f"|format(row.price_high) }}{% else %}—{% endif %}</td>
+          <td>{% if row.cagr_low is not none %}{{ "%.2f"|format(row.cagr_low * 100) }}%{% else %}—{% endif %}</td>
+          <td>{% if row.cagr_high is not none %}{{ "%.2f"|format(row.cagr_high * 100) }}%{% else %}—{% endif %}</td>
+        </tr>{% endfor %}</tbody>
+      </table>
+    </div>
+    <ul class="muted model-notes">{% for note in pe_analysis.model_notes %}<li>{{ note }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
 <section class="analysis-panel">
   <h2>支持与反对事件</h2>
   {% for impact in security.impacts %}
@@ -24,3 +77,35 @@
   {% else %}<div class="empty">尚无已验证事件影响。</div>{% endfor %}
 </section>
 {% endblock %}
+{% block scripts %}{% if pe_analysis %}<script>
+const peRoot = document.getElementById('pe-analysis');
+const peMessage = document.getElementById('pe-message');
+const peEndpoint = '/api/v1/securities/{{ security.id }}/pe-analysis';
+function nullableNumber(input) { const value = input.value.trim(); return value === '' ? null : Number(value); }
+function pePayload() {
+  const overrides = {};
+  peRoot.querySelectorAll('[data-override]').forEach(function (input) { overrides[input.dataset.override] = nullableNumber(input); });
+  const assumptions = Array.from(peRoot.querySelectorAll('#pe-table tbody tr')).map(function (row) {
+    const value = function (name) { return nullableNumber(row.querySelector('[data-assumption="' + name + '"]')); };
+    const revenueGrowth = value('revenue_growth'); const netIncomeGrowth = value('net_income_growth');
+    return {year_offset: Number(row.dataset.yearOffset), revenue_growth: revenueGrowth === null ? null : revenueGrowth / 100, net_income_growth: netIncomeGrowth === null ? null : netIncomeGrowth / 100, pe_low: value('pe_low'), pe_high: value('pe_high')};
+  });
+  return {overrides: overrides, assumptions: assumptions};
+}
+async function showPeResponse(response, successText) {
+  const data = await response.json(); peMessage.classList.remove('hidden');
+  if (!response.ok) { peMessage.textContent = '操作失败：' + (data.detail || JSON.stringify(data)); return false; }
+  peMessage.textContent = successText; window.setTimeout(function () { window.location.reload(); }, 300); return true;
+}
+document.getElementById('save-pe').onclick = async function () {
+  const response = await fetch(peEndpoint, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(pePayload())});
+  await showPeResponse(response, '估值假设已保存并重算。');
+};
+async function refreshPe() {
+  const response = await fetch(peEndpoint + '/refresh', {method: 'POST'});
+  await showPeResponse(response, '基础数据已刷新。');
+}
+document.getElementById('refresh-pe').onclick = refreshPe;
+document.getElementById('clear-pe-overrides').onclick = function () { peRoot.querySelectorAll('[data-override]').forEach(function (input) { input.value = ''; }); document.getElementById('save-pe').click(); };
+{% if pe_analysis.refresh_recommended %}window.addEventListener('load', refreshPe, {once: true});{% endif %}
+</script>{% endif %}{% endblock %}

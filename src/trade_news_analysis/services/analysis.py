@@ -26,8 +26,8 @@ from ..schemas import CandidateCompany, EventPayload, ImpactPayload
 from .scoring import calculate_opportunity_score, evidence_quality
 
 SYSTEM_PROMPT = """你是一名严谨的金融事件研究员。输出是可验证的研究假设，不是投资建议。
-先区分已发生的需求变化与单纯叙事，再映射产业链角色和可能受影响的上市公司。
-不得发明新闻事实；候选公司可以作为待核实假设，但必须明确供应链角色。
+先区分已发生的需求变化与单纯叙事，再映射产业链角色和可能受影响的上市证券。
+不得发明新闻事实；候选证券可以作为待核实假设，但必须明确传导角色。
 不要输出 BUY、SELL、仓位或保证收益。所有解释使用中文，只返回指定结构的 JSON。"""
 
 PayloadT = TypeVar("PayloadT", bound=BaseModel)
@@ -66,8 +66,9 @@ def build_event_prompt(event: Event) -> str:
 1. canonical_title 概括事件本身，不照抄媒体标题。
 2. observed_demand 说明已经发生的采购、交付、使用、价格或产能变化；若没有，明确写“仅有叙事”。
 3. themes 使用具体产业链主题。
-4. candidates 可提出一至三阶受益或受损上市公司，但每家公司都要写清供应链角色。
-5. evidence 只能摘述输入确实包含的事实。
+4. candidates 可提出一至三阶受益或受损上市公司，每个候选都要写清传导角色。
+5. 当事件直接影响黄金或美国国债时，可分别使用 GLD 或 GOVT 作为内部证据载体。
+6. evidence 只能摘述输入确实包含的事实。
 
 JSON Schema：
 {schema}

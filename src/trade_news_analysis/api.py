@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
+from .config import OPPORTUNITY_ASSET_SYMBOLS
 from .models import (
     Article,
     Event,
@@ -17,20 +20,34 @@ from .models import (
     EventSecurityImpact,
     EventTheme,
     IngestionRun,
+    PEAnalysisProfile,
     Security,
     SecuritySignalSnapshot,
     SourceHealth,
     Theme,
     Watchlist,
 )
-from .schemas import RunResponse, WatchlistReplace
+from .schemas import PEAnalysisUpdate, RunResponse, WatchlistInput, WatchlistReplace
 from .services.coordinator import PipelineBusyError, PipelineCoordinator
 from .services.metrics import build_metrics
+from .services.pe_analysis import (
+    analysis_response,
+    apply_snapshot,
+    apply_update,
+    get_or_create_profile,
+    record_refresh_error,
+)
+from .services.providers import lookup_security_record
+from .services.scoring import DIRECTION_SIGN
 
 api_router = APIRouter(prefix="/api/v1")
 web_router = APIRouter()
 VALID_HORIZONS = {1, 5, 20}
 VALID_MARKETS = {"A", "HK", "US"}
+DASHBOARD_OPPORTUNITY_LIMIT = 10
+DASHBOARD_OPPORTUNITY_SOURCE_LIMIT = 200
+DASHBOARD_MARKET_LIMITS = {"US": 7, "A": 3}
+OPPORTUNITY_KINDS = {"industry", "macro", "theme"}
 
 
 def _session(request: Request) -> Session:
@@ -41,7 +58,17 @@ def _coordinator(request: Request) -> PipelineCoordinator:
     return request.app.state.coordinator
 
 
+def _require_watchlisted_security(session: Session, security_id: int) -> Security:
+    security = session.get(Security, security_id)
+    if security is None:
+        raise HTTPException(status_code=404, detail="证券不存在")
+    if session.scalar(select(Watchlist.id).where(Watchlist.security_id == security_id)) is None:
+        raise HTTPException(status_code=409, detail="请先将证券加入自选股")
+    return security
+
+
 def _security_brief(security: Security) -> dict[str, Any]:
+    provider_data = security.provider_data or {}
     return {
         "id": security.id,
         "market": security.market,
@@ -51,7 +78,87 @@ def _security_brief(security: Security) -> dict[str, Any]:
         "industry": security.industry,
         "market_cap": security.market_cap,
         "currency": security.currency,
+        "opportunity_group": provider_data.get("opportunity_group"),
+        "opportunity_scope": provider_data.get("opportunity_scope"),
     }
+
+
+def _normalized_symbol(value: str) -> str:
+    symbol = value.strip().upper().split(".", maxsplit=1)[0]
+    if symbol.isdigit():
+        return symbol.lstrip("0") or "0"
+    return symbol
+
+
+def _security_matches_exactly(security: Security, value: str) -> bool:
+    expected = value.strip().casefold()
+    if security.symbol.casefold() == expected or security.name.casefold() == expected:
+        return True
+    if "." not in value and _normalized_symbol(security.symbol) == _normalized_symbol(value):
+        return True
+    return any(alias.strip().casefold() == expected for alias in (security.aliases or []))
+
+
+def _resolve_watchlist_security(session: Session, item: WatchlistInput) -> Security:
+    if item.security_id is not None:
+        security = session.get(Security, item.security_id)
+        if security is None or not security.active:
+            raise HTTPException(
+                status_code=422,
+                detail=f"不存在或已停用的 security_id：{item.security_id}",
+            )
+        return security
+
+    assert item.query is not None
+    query = select(Security).where(Security.active.is_(True))
+    if item.market:
+        query = query.where(Security.market == item.market)
+    matches = [
+        security
+        for security in session.scalars(query)
+        if _security_matches_exactly(security, item.query)
+    ]
+    if not matches and item.market:
+        try:
+            record = lookup_security_record(item.market, item.query)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无法核验证券：{item.query}（{item.market}），请稍后重试",
+            ) from exc
+        if record is not None:
+            security = Security(
+                market=record.market,
+                exchange=record.exchange,
+                symbol=record.symbol,
+                name=record.name,
+                aliases=record.aliases,
+                industry=record.industry,
+                business_summary=record.business_summary,
+                market_cap=record.market_cap,
+                currency=record.currency,
+                timezone=record.timezone,
+                calendar=record.calendar,
+                provider_data=record.provider_data or {},
+            )
+            session.add(security)
+            session.flush()
+            return security
+    if not matches:
+        market_hint = f"（{item.market}）" if item.market else ""
+        raise HTTPException(
+            status_code=422,
+            detail=f"未找到证券：{item.query}{market_hint}，请输入精确代码或公司名称",
+        )
+    if len(matches) > 1:
+        choices = "、".join(
+            f"{security.market} {security.symbol} {security.name}" for security in matches[:5]
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"证券输入存在歧义：{item.query}；请指定市场或完整代码。匹配项：{choices}",
+        )
+    return matches[0]
 
 
 def _impact_dict(impact: EventSecurityImpact) -> dict[str, Any]:
@@ -257,6 +364,330 @@ def list_opportunities(
         return rows[:limit]
 
 
+def _aggregate_trend_opportunities(
+    rows: list[dict[str, Any]],
+    themes_by_event: dict[int, list[str]],
+    limit: int | None = DASHBOARD_OPPORTUNITY_LIMIT,
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        security = row["security"]
+        signal = row["signal"]
+        macro_group = str(security.get("opportunity_group") or "").strip()
+        industry = str(security.get("industry") or "").strip()
+        opportunity_kind = "macro" if macro_group else "industry"
+        opportunity_type = "宏观资产" if macro_group else "行业"
+        name = macro_group or industry
+        if not name:
+            theme_counts = Counter(
+                theme_name
+                for event_id in signal.get("evidence_event_ids", [])
+                for theme_name in themes_by_event.get(event_id, [])
+            )
+            if theme_counts:
+                name = min(theme_counts, key=lambda item: (-theme_counts[item], item))
+                opportunity_kind = "theme"
+                opportunity_type = "产业主题"
+            else:
+                name = f"{security['market']} 其他行业"
+
+        key = (opportunity_kind, name)
+        group = groups.setdefault(
+            key,
+            {
+                "name": name,
+                "kind": opportunity_kind,
+                "type": opportunity_type,
+                "markets": set(),
+                "market_weights": {},
+                "security_ids": set(),
+                "event_ids": set(),
+                "weight": 0.0,
+                "weighted_score": 0.0,
+                "weighted_confidence": 0.0,
+                "weighted_conflict": 0.0,
+            },
+        )
+        group["markets"].add(
+            security.get("opportunity_scope") or security["market"]
+        )
+        group["security_ids"].add(security["id"])
+        group["event_ids"].update(signal.get("evidence_event_ids", []))
+        weight = max(float(signal["confidence"]), 0.01)
+        market_weight = abs(float(signal["score"])) * weight
+        group["market_weights"][security["market"]] = (
+            group["market_weights"].get(security["market"], 0.0) + market_weight
+        )
+        group["weight"] += weight
+        group["weighted_score"] += float(signal["score"]) * weight
+        group["weighted_confidence"] += float(signal["confidence"]) * weight
+        group["weighted_conflict"] += float(signal["conflict"]) * weight
+
+    result = []
+    for group in groups.values():
+        weight = group["weight"]
+        score = group["weighted_score"] / weight
+        primary_market = max(
+            group["market_weights"],
+            key=lambda market: (group["market_weights"][market], market),
+        )
+        result.append(
+            {
+                "name": group["name"],
+                "kind": group["kind"],
+                "type": group["type"],
+                "markets": sorted(group["markets"]),
+                "primary_market": primary_market,
+                "score": round(score, 2),
+                "direction": "bullish" if score > 5 else "bearish" if score < -5 else "neutral",
+                "confidence": round(group["weighted_confidence"] / weight, 4),
+                "conflict": round(group["weighted_conflict"] / weight, 4),
+                "evidence_count": len(group["security_ids"]),
+                "security_ids": sorted(group["security_ids"]),
+                "event_ids": sorted(group["event_ids"]),
+            }
+        )
+    result.sort(key=lambda item: item["score"], reverse=True)
+    visible = result if limit is None else result[:limit]
+    for rank, item in enumerate(visible, 1):
+        item["rank"] = rank
+    return visible
+
+
+def _trend_opportunities(
+    request: Request,
+    market: str | None,
+    theme: str | None,
+    horizon: int,
+    limit: int | None,
+) -> list[dict[str, Any]]:
+    rows = list_opportunities(
+        request, market, theme, horizon, DASHBOARD_OPPORTUNITY_SOURCE_LIMIT
+    )
+    event_ids = {
+        event_id
+        for row in rows
+        if not row["security"].get("industry")
+        and not row["security"].get("opportunity_group")
+        for event_id in row["signal"].get("evidence_event_ids", [])
+    }
+    themes_by_event: dict[int, list[str]] = {}
+    if event_ids:
+        with _session(request) as session:
+            for event_id, theme_name in session.execute(
+                select(EventTheme.event_id, Theme.name)
+                .join(Theme, EventTheme.theme_id == Theme.id)
+                .where(EventTheme.event_id.in_(event_ids))
+            ):
+                themes_by_event.setdefault(event_id, []).append(theme_name)
+    return _aggregate_trend_opportunities(rows, themes_by_event, limit)
+
+
+def _opportunity_url(
+    opportunity: dict[str, Any],
+    horizon: int,
+    market: str | None,
+    theme: str | None,
+) -> str:
+    params: dict[str, str | int] = {"name": opportunity["name"], "horizon": horizon}
+    if market:
+        params["market"] = market
+    if theme:
+        params["theme"] = theme
+    return f"/opportunities/{opportunity['kind']}?{urlencode(params)}"
+
+
+def _dashboard_opportunities(
+    request: Request,
+    market: str | None,
+    theme: str | None,
+    horizon: int,
+) -> list[dict[str, Any]]:
+    all_opportunities = _trend_opportunities(request, market, theme, horizon, None)
+    if market:
+        opportunities = all_opportunities[:DASHBOARD_OPPORTUNITY_LIMIT]
+    else:
+        opportunities = [
+            opportunity
+            for quota_market, limit in DASHBOARD_MARKET_LIMITS.items()
+            for opportunity in [
+                item
+                for item in all_opportunities
+                if item["primary_market"] == quota_market
+            ][:limit]
+        ]
+        opportunities.sort(key=lambda item: item["score"], reverse=True)
+        for rank, opportunity in enumerate(opportunities, 1):
+            opportunity["rank"] = rank
+    for opportunity in opportunities:
+        opportunity["detail_url"] = _opportunity_url(
+            opportunity, horizon, market, theme
+        )
+    return opportunities
+
+
+def _unique_impact_values(
+    impacts: list[EventSecurityImpact], attribute: str, limit: int = 5
+) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for impact in sorted(impacts, key=lambda item: item.opportunity_score, reverse=True):
+        raw_values = getattr(impact, attribute)
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+            if len(result) == limit:
+                return result
+    return result
+
+
+def _related_stock_rows(
+    impacts: list[EventSecurityImpact], horizon: int, limit: int = 5
+) -> list[dict[str, Any]]:
+    groups: dict[int, dict[str, Any]] = {}
+    for impact in impacts:
+        if (
+            (impact.security.provider_data or {}).get("research_asset")
+            or impact.security.symbol in OPPORTUNITY_ASSET_SYMBOLS
+        ):
+            continue
+        horizon_impact = (impact.impacts or {}).get(str(horizon))
+        if not isinstance(horizon_impact, dict):
+            continue
+        confidence = float(horizon_impact.get("confidence") or 0.0)
+        direction = str(horizon_impact.get("direction") or "neutral")
+        contribution = (
+            DIRECTION_SIGN.get(direction, 0.0) * impact.opportunity_score * confidence
+        )
+        group = groups.setdefault(
+            impact.security_id,
+            {
+                "security": impact.security,
+                "signed_total": 0.0,
+                "absolute_total": 0.0,
+                "confidence_total": 0.0,
+                "impact_count": 0,
+                "event_ids": set(),
+                "best_thesis": "",
+                "best_thesis_weight": -1.0,
+            },
+        )
+        group["signed_total"] += contribution
+        group["absolute_total"] += abs(contribution)
+        group["confidence_total"] += confidence
+        group["impact_count"] += 1
+        group["event_ids"].add(impact.event_id)
+        thesis_weight = impact.opportunity_score * confidence
+        if impact.thesis and thesis_weight > group["best_thesis_weight"]:
+            group["best_thesis"] = impact.thesis
+            group["best_thesis_weight"] = thesis_weight
+
+    result = []
+    for group in groups.values():
+        normalizer = group["confidence_total"]
+        if normalizer <= 0:
+            continue
+        score = group["signed_total"] / normalizer
+        conflict = (
+            1.0 - abs(group["signed_total"]) / group["absolute_total"]
+            if group["absolute_total"]
+            else 0.0
+        )
+        mean_confidence = normalizer / group["impact_count"]
+        confidence = max(0.0, min(1.0, mean_confidence * (1 - conflict)))
+        direction = "bullish" if score > 5 else "bearish" if score < -5 else "neutral"
+        result.append(
+            {
+                "security": _security_brief(group["security"]),
+                "score": round(score, 2),
+                "direction": direction,
+                "confidence": round(confidence, 4),
+                "conflict": round(max(0.0, min(1.0, conflict)), 4),
+                "evidence_event_count": len(group["event_ids"]),
+                "thesis": group["best_thesis"],
+                "relevance": abs(score) * confidence,
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            item["relevance"],
+            abs(item["score"]),
+            item["security"]["symbol"],
+        ),
+        reverse=True,
+    )
+    return result[:limit]
+
+
+def _opportunity_detail(
+    request: Request,
+    kind: str,
+    name: str,
+    horizon: int,
+    market: str | None,
+    theme: str | None,
+) -> dict[str, Any]:
+    if kind not in OPPORTUNITY_KINDS:
+        raise HTTPException(status_code=404, detail="机会不存在")
+    opportunities = _trend_opportunities(request, market, theme, horizon, None)
+    opportunity = next(
+        (
+            item
+            for item in opportunities
+            if item["kind"] == kind and item["name"] == name
+        ),
+        None,
+    )
+    if opportunity is None:
+        raise HTTPException(status_code=404, detail="机会不存在或已无有效信号")
+
+    event_ids = set(opportunity["event_ids"])
+    security_ids = set(opportunity["security_ids"])
+    with _session(request) as session:
+        events = list(
+            session.scalars(_event_query().where(Event.id.in_(event_ids))).unique().all()
+        ) if event_ids else []
+        events.sort(
+            key=lambda item: item.occurred_at or item.created_at,
+            reverse=True,
+        )
+        impacts = [
+            impact
+            for event in events
+            for impact in event.impacts
+            if impact.is_current and impact.status == "complete"
+        ]
+        defining_impacts = [
+            impact for impact in impacts if impact.security_id in security_ids
+        ]
+        event_rows = [_event_dict(event) for event in events[:10]]
+        stocks = _related_stock_rows(impacts, horizon)
+
+    back_params: dict[str, str | int] = {"horizon": horizon}
+    if market:
+        back_params["market"] = market
+    if theme:
+        back_params["theme"] = theme
+    return {
+        **opportunity,
+        "horizon": horizon,
+        "events": event_rows,
+        "event_total": len(events),
+        "stocks": stocks,
+        "analysis": {
+            "theses": _unique_impact_values(defining_impacts, "thesis"),
+            "catalysts": _unique_impact_values(defining_impacts, "catalysts"),
+            "risks": _unique_impact_values(defining_impacts, "risks"),
+            "falsifiers": _unique_impact_values(defining_impacts, "falsifiers"),
+        },
+        "back_url": f"/?{urlencode(back_params)}",
+    }
+
+
 @api_router.get("/securities")
 def list_securities(
     request: Request,
@@ -269,15 +700,28 @@ def list_securities(
         if market:
             query = query.where(Security.market == market)
         if q:
+            q = q.strip()
             query = query.where(
                 Security.name.ilike(f"%{q}%") | Security.symbol.ilike(f"%{q}%")
             )
-        return [
-            _security_brief(item)
-            for item in session.scalars(
-                query.order_by(Security.market, Security.symbol).limit(limit)
+        securities = list(
+            session.scalars(
+                query.order_by(Security.market, Security.symbol).limit(limit * 5)
             )
-        ]
+        )
+        if q:
+            expected = q.casefold()
+            securities.sort(
+                key=lambda item: (
+                    0
+                    if item.symbol.casefold() == expected
+                    or item.name.casefold() == expected
+                    else 1,
+                    item.market,
+                    item.symbol,
+                )
+            )
+        return [_security_brief(item) for item in securities[:limit]]
 
 
 @api_router.get("/securities/{security_id}")
@@ -289,6 +733,7 @@ def get_security(security_id: int, request: Request) -> dict[str, Any]:
             .options(
                 selectinload(Security.impacts).selectinload(EventSecurityImpact.event),
                 selectinload(Security.snapshots),
+                selectinload(Security.watchlist_entry),
             )
         )
         if security is None:
@@ -305,12 +750,60 @@ def get_security(security_id: int, request: Request) -> dict[str, Any]:
             "business_summary": security.business_summary,
             "timezone": security.timezone,
             "calendar": security.calendar,
+            "watchlisted": security.watchlist_entry is not None,
             "signals": {str(key): _signal_dict(value) for key, value in latest.items()},
             "impacts": [
                 {**_impact_dict(item), "event_title": item.event.title}
                 for item in impacts
             ],
         }
+
+
+@api_router.get("/securities/{security_id}/pe-analysis")
+def get_pe_analysis(security_id: int, request: Request) -> dict[str, Any]:
+    with _session(request) as session:
+        security = _require_watchlisted_security(session, security_id)
+        profile = session.scalar(
+            select(PEAnalysisProfile).where(PEAnalysisProfile.security_id == security_id)
+        )
+        return analysis_response(security, profile)
+
+
+@api_router.put("/securities/{security_id}/pe-analysis")
+def update_pe_analysis(
+    security_id: int, payload: PEAnalysisUpdate, request: Request
+) -> dict[str, Any]:
+    with _session(request) as session:
+        security = _require_watchlisted_security(session, security_id)
+        profile = get_or_create_profile(session, security)
+        apply_update(profile, payload)
+        session.commit()
+        return analysis_response(security, profile)
+
+
+@api_router.post("/securities/{security_id}/pe-analysis/refresh")
+def refresh_pe_analysis(security_id: int, request: Request) -> dict[str, Any]:
+    with _session(request) as session:
+        security = _require_watchlisted_security(session, security_id)
+        profile = get_or_create_profile(session, security)
+        try:
+            snapshot = request.app.state.fundamental_provider.fetch(
+                security.market,
+                security.symbol,
+                security.provider_data or {},
+            )
+        except Exception as exc:
+            record_refresh_error(profile, exc)
+            session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="自动基础数据刷新失败，已保留上次成功数据",
+            ) from exc
+        apply_snapshot(profile, snapshot)
+        if snapshot.market_cap is not None:
+            security.market_cap = snapshot.market_cap
+        session.commit()
+        return analysis_response(security, profile)
 
 
 @api_router.get("/themes")
@@ -495,14 +988,20 @@ def get_watchlist(request: Request) -> list[dict[str, Any]]:
     with _session(request) as session:
         items = session.scalars(
             select(Watchlist)
-            .options(selectinload(Watchlist.security))
-            .order_by(Watchlist.created_at)
+            .options(
+                selectinload(Watchlist.security).selectinload(Security.pe_analysis_profile)
+            )
+            .order_by(Watchlist.position, Watchlist.id)
         ).all()
         return [
             {
                 "security_id": item.security_id,
                 "active": item.active,
+                "position": item.position,
                 "security": _security_brief(item.security),
+                "pe_analysis": analysis_response(
+                    item.security, item.security.pe_analysis_profile
+                )["summary"],
             }
             for item in items
         ]
@@ -510,17 +1009,25 @@ def get_watchlist(request: Request) -> list[dict[str, Any]]:
 
 @api_router.put("/watchlist")
 def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[str, Any]]:
-    security_ids = [item.security_id for item in payload.items]
-    if len(security_ids) != len(set(security_ids)):
-        raise HTTPException(status_code=422, detail="自选证券不能重复")
     with _session(request) as session:
-        existing = set(
-            session.scalars(select(Security.id).where(Security.id.in_(security_ids)))
-        )
-        if existing != set(security_ids):
-            raise HTTPException(status_code=422, detail="包含不存在的 security_id")
+        resolved = [
+            (_resolve_watchlist_security(session, item), item)
+            for item in payload.items
+        ]
+        security_ids = [security.id for security, _ in resolved]
+        if len(security_ids) != len(set(security_ids)):
+            raise HTTPException(status_code=422, detail="自选证券不能重复")
         session.execute(delete(Watchlist))
-        session.add_all([Watchlist(**item.model_dump()) for item in payload.items])
+        session.add_all(
+            [
+                Watchlist(
+                    security_id=security.id,
+                    active=item.active,
+                    position=position,
+                )
+                for position, (security, item) in enumerate(resolved)
+            ]
+        )
         session.commit()
     return get_watchlist(request)
 
@@ -578,7 +1085,7 @@ def dashboard(
     theme: str | None = None,
     horizon: int = 5,
 ) -> HTMLResponse:
-    opportunities = list_opportunities(request, market, theme, horizon, 50)
+    opportunities = _dashboard_opportunities(request, market, theme, horizon)
     watchlist = get_watchlist(request)
     themes = list_themes(request)
     coverage = health(request)
@@ -609,12 +1116,37 @@ def dashboard(
     )
 
 
+@web_router.get("/opportunities/{kind}", response_class=HTMLResponse)
+def opportunity_page(
+    kind: str,
+    request: Request,
+    name: str = Query(min_length=1, max_length=160),
+    horizon: int = Query(default=5),
+    market: str | None = Query(default=None, pattern="^(A|HK|US)$"),
+    theme: str | None = None,
+) -> HTMLResponse:
+    opportunity = _opportunity_detail(
+        request, kind, name, horizon, market, theme
+    )
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="opportunity.html",
+        context={"opportunity": opportunity},
+    )
+
+
 @web_router.get("/securities/{security_id}", response_class=HTMLResponse)
 def security_page(security_id: int, request: Request) -> HTMLResponse:
+    security = get_security(security_id, request)
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="security.html",
-        context={"security": get_security(security_id, request)},
+        context={
+            "security": security,
+            "pe_analysis": get_pe_analysis(security_id, request)
+            if security["watchlisted"]
+            else None,
+        },
     )
 
 
@@ -656,10 +1188,7 @@ def watchlist_page(request: Request) -> HTMLResponse:
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="watchlist.html",
-        context={
-            "items": get_watchlist(request),
-            "securities": list_securities(request, market=None, q=None, limit=500),
-        },
+        context={"items": get_watchlist(request)},
     )
 
 

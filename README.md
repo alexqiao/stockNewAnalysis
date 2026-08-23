@@ -85,7 +85,7 @@ curl 'http://127.0.0.1:8000/api/v1/news?symbol=AAPL'
 curl 'http://127.0.0.1:8000/api/v1/metrics?market=US&horizon=5&top_k=10'
 ~~~
 
-自选股 API 使用 security_id，不再接受裸股票代码；这是 0.2 版本的破坏性变更。
+自选股在数据库中始终关联稳定的 `security_id`；API 既接受 `security_id`，也接受可选市场加精确代码/公司名称。后端会先唯一解析，本地主数据没有但已明确市场的标准代码会通过 yfinance 核验后再保存。
 
 ## 评分与验证
 

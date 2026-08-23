@@ -1,27 +1,99 @@
 {% extends "base.html" %}
 {% block title %}自选股 · 股票事件研究{% endblock %}
 {% block content %}
-<section class="page-heading"><p class="eyebrow">WATCHLIST</p><h1>管理自选股</h1><p class="lead">自选股只影响个人首页，不限制全市场机会发现。</p></section>
+<section class="page-heading"><p class="eyebrow">WATCHLIST</p><h1>管理自选股</h1><p class="lead">直接输入 A 股、港股或美股的代码/公司名称。选择市场可以避免同名或同代码歧义。</p></section>
 <section class="analysis-panel">
-  <table id="watchlist-table"><thead><tr><th>证券</th><th>启用</th><th></th></tr></thead><tbody>
-  {% for item in items %}<tr><td><select data-field="security_id">{% for security in securities %}<option value="{{ security.id }}" {% if security.id == item.security_id %}selected{% endif %}>{{ security.market }} · {{ security.symbol }} · {{ security.name }}</option>{% endfor %}</select></td><td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button class="remove secondary">删除</button></td></tr>{% endfor %}
+  <table id="watchlist-table"><thead><tr><th>排序</th><th>市场</th><th>代码或公司名称</th><th>PE 估值</th><th>启用</th><th></th></tr></thead><tbody>
+  {% for item in items %}<tr>
+    <td><div class="order-controls"><button type="button" class="move-up secondary" aria-label="上移">↑</button><button type="button" class="move-down secondary" aria-label="下移">↓</button></div></td>
+    <td><select data-field="market"><option value="">自动识别</option>{% for market in ["A", "HK", "US"] %}<option value="{{ market }}" {% if market == item.security.market %}selected{% endif %}>{{ {"A": "A股", "HK": "港股", "US": "美股"}[market] }}</option>{% endfor %}</select></td>
+    <td><div class="security-picker"><input type="hidden" data-field="security_id" value="{{ item.security_id }}"><input type="text" data-field="query" value="{{ item.security.symbol }}" placeholder="如 AAPL、00700.HK、贵州茅台" autocomplete="off"><div class="selected-security">{{ item.security.market }} · {{ item.security.symbol }} · {{ item.security.name }}</div><div class="search-results hidden"></div></div></td>
+    <td class="pe-summary">{% if item.pe_analysis.status == "ready" and item.pe_analysis.price_low is not none %}<a href="/securities/{{ item.security_id }}#pe-analysis"><strong>{{ item.pe_analysis.year }}：{{ "%.2f"|format(item.pe_analysis.price_low) }}–{{ "%.2f"|format(item.pe_analysis.price_high) }}</strong><span>CAGR {{ "%.1f"|format(item.pe_analysis.cagr_low * 100) }}%–{{ "%.1f"|format(item.pe_analysis.cagr_high * 100) }}%</span></a>{% else %}<a href="/securities/{{ item.security_id }}#pe-analysis">待填写估值假设</a>{% endif %}</td>
+    <td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button type="button" class="remove secondary">删除</button></td>
+  </tr>{% endfor %}
   </tbody></table>
-  <div class="actions"><button id="add" class="secondary">添加</button><button id="save" class="primary">保存</button></div>
+  <div class="actions"><button type="button" id="add" class="secondary">添加</button><button type="button" id="save" class="primary">保存</button></div>
   <div id="message" class="notice hidden"></div>
 </section>
-<template id="row-template"><tr><td><select data-field="security_id">{% for security in securities %}<option value="{{ security.id }}">{{ security.market }} · {{ security.symbol }} · {{ security.name }}</option>{% endfor %}</select></td><td><input type="checkbox" data-field="active" checked></td><td><button class="remove secondary">删除</button></td></tr></template>
+<template id="row-template"><tr>
+  <td><div class="order-controls"><button type="button" class="move-up secondary" aria-label="上移">↑</button><button type="button" class="move-down secondary" aria-label="下移">↓</button></div></td>
+  <td><select data-field="market"><option value="">自动识别</option><option value="A">A股</option><option value="HK">港股</option><option value="US">美股</option></select></td>
+  <td><div class="security-picker"><input type="hidden" data-field="security_id"><input type="text" data-field="query" placeholder="如 AAPL、00700.HK、贵州茅台" autocomplete="off"><div class="selected-security muted">输入后可从匹配结果中选择，也可直接保存精确代码。</div><div class="search-results hidden"></div></div></td>
+  <td class="pe-summary muted">保存后可填写估值假设</td>
+  <td><input type="checkbox" data-field="active" checked></td><td><button type="button" class="remove secondary">删除</button></td>
+</tr></template>
 {% endblock %}
 {% block scripts %}<script>
 const tbody = document.querySelector('#watchlist-table tbody');
-function bindRemove(scope) { scope.querySelectorAll('.remove').forEach(function (button) { button.onclick = function () { button.closest('tr').remove(); }; }); }
-bindRemove(document);
-document.getElementById('add').onclick = function () { tbody.appendChild(document.getElementById('row-template').content.cloneNode(true)); bindRemove(tbody.lastElementChild); };
+function closeResults(row) { row.querySelector('.search-results').classList.add('hidden'); }
+function refreshOrderButtons() {
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.forEach(function (row, index) {
+    row.querySelector('.move-up').disabled = index === 0;
+    row.querySelector('.move-down').disabled = index === rows.length - 1;
+  });
+}
+function bindRow(row) {
+  const input = row.querySelector('[data-field="query"]');
+  const securityId = row.querySelector('[data-field="security_id"]');
+  const market = row.querySelector('[data-field="market"]');
+  const selected = row.querySelector('.selected-security');
+  const results = row.querySelector('.search-results');
+  let timer;
+  row.querySelector('.remove').onclick = function () { row.remove(); refreshOrderButtons(); };
+  row.querySelector('.move-up').onclick = function () {
+    const previous = row.previousElementSibling;
+    if (previous) tbody.insertBefore(row, previous);
+    refreshOrderButtons();
+  };
+  row.querySelector('.move-down').onclick = function () {
+    const next = row.nextElementSibling;
+    if (next) tbody.insertBefore(next, row);
+    refreshOrderButtons();
+  };
+  input.oninput = function () {
+    securityId.value = '';
+    selected.textContent = '尚未确认，将在保存时按精确代码或公司名称解析。';
+    clearTimeout(timer);
+    if (input.value.trim().length < 1) { closeResults(row); return; }
+    timer = setTimeout(async function () {
+      const params = new URLSearchParams({q: input.value.trim(), limit: '12'});
+      if (market.value) params.set('market', market.value);
+      const response = await fetch('/api/v1/securities?' + params.toString());
+      const matches = response.ok ? await response.json() : [];
+      results.replaceChildren();
+      matches.forEach(function (security) {
+        const option = document.createElement('button');
+        option.type = 'button'; option.className = 'search-option';
+        option.textContent = security.market + ' · ' + security.symbol + ' · ' + security.name;
+        option.onclick = function () {
+          securityId.value = security.id; input.value = security.symbol; market.value = security.market;
+          selected.textContent = option.textContent; closeResults(row);
+        };
+        results.appendChild(option);
+      });
+      if (!matches.length) {
+        const empty = document.createElement('span'); empty.className = 'search-empty'; empty.textContent = '没有模糊匹配，可检查后直接保存精确代码。'; results.appendChild(empty);
+      }
+      results.classList.remove('hidden');
+    }, 220);
+  };
+  market.onchange = function () { securityId.value = ''; input.dispatchEvent(new Event('input')); };
+}
+tbody.querySelectorAll('tr').forEach(bindRow);
+refreshOrderButtons();
+document.getElementById('add').onclick = function () { const fragment = document.getElementById('row-template').content.cloneNode(true); const row = fragment.querySelector('tr'); tbody.appendChild(fragment); bindRow(row); refreshOrderButtons(); const input = row.querySelector('[data-field="query"]'); input.focus(); };
 document.getElementById('save').onclick = async function () {
   const items = Array.from(tbody.querySelectorAll('tr')).map(function (row) {
-    return {security_id: Number(row.querySelector('[data-field="security_id"]').value), active: row.querySelector('[data-field="active"]').checked};
+    const id = row.querySelector('[data-field="security_id"]').value;
+    const market = row.querySelector('[data-field="market"]').value;
+    const item = {active: row.querySelector('[data-field="active"]').checked};
+    if (id) item.security_id = Number(id); else { item.query = row.querySelector('[data-field="query"]').value.trim(); if (market) item.market = market; }
+    return item;
   });
   const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})});
   const message = document.getElementById('message'); message.classList.remove('hidden');
-  message.textContent = response.ok ? '已保存。' : '保存失败：' + JSON.stringify(await response.json());
+  if (response.ok) { message.textContent = '已保存。'; window.setTimeout(function () { window.location.reload(); }, 400); }
+  else { const error = await response.json(); message.textContent = '保存失败：' + (error.detail || JSON.stringify(error)); }
 };
 </script>{% endblock %}

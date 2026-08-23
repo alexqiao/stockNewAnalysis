@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Direction = Literal["bullish", "neutral", "bearish"]
 Market = Literal["A", "HK", "US"]
@@ -77,12 +77,66 @@ class SecurityInput(BaseModel):
 
 
 class WatchlistInput(BaseModel):
-    security_id: int = Field(gt=0)
+    security_id: int | None = Field(default=None, gt=0)
+    query: str | None = Field(default=None, max_length=160)
+    market: Market | None = None
     active: bool = True
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str | None) -> str | None:
+        value = value.strip() if value else None
+        return value or None
+
+    @model_validator(mode="after")
+    def require_security_reference(self) -> Self:
+        if self.security_id is None and self.query is None:
+            raise ValueError("security_id 和 query 至少提供一个")
+        return self
 
 
 class WatchlistReplace(BaseModel):
     items: list[WatchlistInput] = Field(max_length=500)
+
+
+class PEForecastAssumption(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    year_offset: int = Field(ge=1, le=4)
+    revenue_growth: float | None = Field(default=None, gt=-1)
+    net_income_growth: float | None = Field(default=None, gt=-1)
+    pe_low: float = Field(gt=0)
+    pe_high: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_pe_range(self) -> Self:
+        if self.pe_low > self.pe_high:
+            raise ValueError("PE Low 不能高于 PE High")
+        return self
+
+
+class PEAnalysisOverrides(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    fiscal_year: int | None = Field(default=None, ge=1900, le=2200)
+    price: float | None = Field(default=None, gt=0)
+    shares_outstanding: float | None = Field(default=None, gt=0)
+    revenue: float | None = Field(default=None, gt=0)
+    net_income: float | None = None
+
+
+class PEAnalysisUpdate(BaseModel):
+    overrides: PEAnalysisOverrides = Field(default_factory=PEAnalysisOverrides)
+    assumptions: list[PEForecastAssumption] = Field(min_length=4, max_length=4)
+
+    @field_validator("assumptions")
+    @classmethod
+    def require_four_ordered_years(
+        cls, value: list[PEForecastAssumption]
+    ) -> list[PEForecastAssumption]:
+        if [item.year_offset for item in value] != [1, 2, 3, 4]:
+            raise ValueError("assumptions 必须按顺序包含 1、2、3、4 年")
+        return value
 
 
 class ORMModel(BaseModel):

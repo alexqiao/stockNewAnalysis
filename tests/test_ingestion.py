@@ -9,6 +9,7 @@ from trade_news_analysis.db import SessionFactory
 from trade_news_analysis.models import Article, Event, EventArticle, IngestionRun, Security
 from trade_news_analysis.services.ingestion import IngestionService
 from trade_news_analysis.services.normalization import NormalizedArticle
+from trade_news_analysis.services.providers import SecurityRecord
 from trade_news_analysis.services.sources import NewsSource, SourceResult
 
 
@@ -97,3 +98,64 @@ def test_source_failure_is_recorded_without_crashing_run(
         assert run is not None
         assert run.status == "partial"
         assert "TimeoutError" in run.errors[0]
+
+
+def test_ingestion_tracks_macro_research_assets(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    tracked_symbols: set[str] = set()
+
+    def capture_sources(
+        securities: list[Security], _settings: Settings
+    ) -> list[NewsSource]:
+        tracked_symbols.update(item.symbol for item in securities)
+        return []
+
+    service = IngestionService(
+        session_factory,
+        settings,
+        source_factory=capture_sources,
+        master_factory=no_master,
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id)
+
+    assert {"GLD", "GOVT"} <= tracked_symbols
+
+
+def test_security_master_preserves_macro_asset_classification(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    class MacroAssetMaster:
+        name: str = "macro-master"
+        markets: tuple[str, ...] = ("US",)
+
+        def fetch_securities(self) -> list[SecurityRecord]:
+            return [
+                SecurityRecord(
+                    market="US",
+                    exchange="US",
+                    symbol="GLD",
+                    name="SPDR Gold Shares",
+                    aliases=["Gold"],
+                    provider_data={"source": "test"},
+                )
+            ]
+
+    service = IngestionService(
+        session_factory,
+        settings,
+        source_factory=lambda _securities, _settings: [],
+        master_factory=lambda _settings: MacroAssetMaster(),
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id)
+
+    with session_factory() as session:
+        gold_assets = session.scalars(
+            select(Security).where(Security.market == "US", Security.symbol == "GLD")
+        ).all()
+        assert len(gold_assets) == 1
+        assert gold_assets[0].industry == "黄金"
+        assert gold_assets[0].provider_data["opportunity_group"] == "黄金"
+        assert gold_assets[0].provider_data["source"] == "test"

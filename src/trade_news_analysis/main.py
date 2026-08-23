@@ -17,6 +17,7 @@ from .config import Settings, get_settings
 from .db import SessionFactory, build_engine, build_session_factory, initialize_database
 from .scheduler import start_scheduler
 from .services.coordinator import PipelineBusyError, PipelineCoordinator
+from .services.providers import FundamentalDataProvider, InvestorMateFundamentalProvider
 
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).parent
@@ -26,6 +27,7 @@ def create_app(
     settings: Settings | None = None,
     session_factory: SessionFactory | None = None,
     coordinator: PipelineCoordinator | None = None,
+    fundamental_provider: FundamentalDataProvider | None = None,
 ) -> FastAPI:
     app_settings = settings or get_settings()
     app_settings.ensure_local_directories()
@@ -57,6 +59,7 @@ def create_app(
     app.state.settings = app_settings
     app.state.session_factory = session_factory
     app.state.coordinator = app_coordinator
+    app.state.fundamental_provider = fundamental_provider or InvestorMateFundamentalProvider()
     app.state.templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
     app.include_router(api_router)

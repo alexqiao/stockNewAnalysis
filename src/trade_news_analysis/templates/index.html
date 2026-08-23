@@ -2,9 +2,9 @@
 {% block content %}
 <section class="hero">
   <div>
-    <p class="eyebrow">SECURITY FIRST · EVIDENCE BACKED</p>
-    <h1>从事件发现标的，再用证据持续验证</h1>
-    <p class="lead">多篇新闻先聚合为事件，再映射产业链主题和股票。排名衡量需求确定性、财务传导与公司弹性，不代表收益承诺。</p>
+    <p class="eyebrow">TREND FIRST · EVIDENCE BACKED</p>
+    <h1>从事件发现趋势，再用证据持续验证</h1>
+    <p class="lead">多篇新闻先聚合为事件，再映射行业、宏观资产和具体证券。机会榜展示趋势，不代表个股推荐或收益承诺。</p>
   </div>
   <button id="ingest-button" class="primary">立即采集</button>
 </section>
@@ -13,6 +13,7 @@
 <div id="run-message" class="notice hidden"></div>
 
 <section class="section-heading"><div><p class="eyebrow">OPPORTUNITY DISCOVERY</p><h2>跨市场机会榜</h2></div></section>
+<p class="muted">按行业和宏观资产聚合证券证据，默认美股最多 7 个、A 股最多 3 个；黄金和美债通过代表性资产持续验证。</p>
 <form class="filters" method="get">
   <label>市场
     <select name="market">
@@ -35,19 +36,21 @@
 </form>
 <section class="analysis-panel">
   <table>
-    <thead><tr><th>排名</th><th>标的</th><th>市场</th><th>综合分</th><th>方向</th><th>置信度</th><th>冲突度</th></tr></thead>
+    <thead><tr><th>排名</th><th>机会</th><th>类型</th><th>主市场 / 覆盖</th><th>综合分</th><th>方向</th><th>置信度</th><th>冲突度</th><th>证据覆盖</th></tr></thead>
     <tbody>
     {% for item in opportunities %}
       <tr>
-        <td>{{ item.signal.rank or loop.index }}</td>
-        <td><a href="/securities/{{ item.security.id }}"><strong>{{ item.security.name }}</strong><br><span class="muted">{{ item.security.symbol }}</span></a></td>
-        <td>{{ item.security.market }} · {{ item.security.exchange }}</td>
-        <td><strong>{{ "%.1f"|format(item.signal.score) }}</strong></td>
-        <td><span class="direction {{ item.signal.direction }}">{{ item.signal.direction }}</span></td>
-        <td>{{ "%.0f"|format(item.signal.confidence * 100) }}%</td>
-        <td>{{ "%.0f"|format(item.signal.conflict * 100) }}%</td>
+        <td>{{ item.rank }}</td>
+        <td><a class="opportunity-link" href="{{ item.detail_url }}"><strong>{{ item.name }}</strong></a></td>
+        <td>{{ item.type }}</td>
+        <td><strong>{{ item.primary_market }}</strong><br><span class="muted">覆盖 {{ item.markets|join(" · ") }}</span></td>
+        <td><strong>{{ "%.1f"|format(item.score) }}</strong></td>
+        <td><span class="direction {{ item.direction }}">{{ item.direction }}</span></td>
+        <td>{{ "%.0f"|format(item.confidence * 100) }}%</td>
+        <td>{{ "%.0f"|format(item.conflict * 100) }}%</td>
+        <td>{{ item.evidence_count }} 个标的</td>
       </tr>
-    {% else %}<tr><td colspan="7">尚无已验证候选。采集并完成事件分析后会出现在这里。</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="9">尚无已验证趋势。采集并完成事件分析后会出现在这里。</td></tr>{% endfor %}
     </tbody>
   </table>
 </section>
