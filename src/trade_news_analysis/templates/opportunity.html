@@ -57,8 +57,8 @@
   <article class="candidate-card">
     <div class="meta"><span>{{ event.event_type or "待分类" }}</span><time>{{ event.occurred_at or event.updated_at }}</time></div>
     <h3><a href="/events/{{ event.id }}">{{ event.title }}</a></h3>
-    <p>{{ event.summary or "暂无事件摘要。" }}</p>
-    <p><strong>已发生的需求变化：</strong>{{ event.observed_demand or "尚未形成可靠判断。" }}</p>
+    <p><strong>主题证据：</strong>{{ event.opportunity_evidence|join("；") or "暂无主题级证据摘述。" }}</p>
+    <p><strong>主题传导：</strong>{{ event.opportunity_theses|join("；") or "尚未形成可靠判断。" }}</p>
     <div class="signals">
       {% for theme in event.themes %}<span class="tag">{{ theme.name }}</span>{% endfor %}
       <span class="direction pending">{{ event.articles|length }} 个来源</span>

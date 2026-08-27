@@ -143,6 +143,9 @@ class Theme(Base):
     event_links: Mapped[list[EventTheme]] = relationship(
         back_populates="theme", cascade="all, delete-orphan"
     )
+    impact_links: Mapped[list[EventSecurityImpactTheme]] = relationship(
+        back_populates="theme", cascade="all, delete-orphan"
+    )
 
 
 class EventTheme(Base):
@@ -194,6 +197,29 @@ class EventSecurityImpact(Base):
 
     event: Mapped[Event] = relationship(back_populates="impacts")
     security: Mapped[Security] = relationship(back_populates="impacts")
+    theme_links: Mapped[list[EventSecurityImpactTheme]] = relationship(
+        back_populates="impact", cascade="all, delete-orphan"
+    )
+
+
+class EventSecurityImpactTheme(Base):
+    """A theme explicitly assigned to one event-to-security transmission."""
+
+    __tablename__ = "event_security_impact_themes"
+    __table_args__ = (
+        UniqueConstraint("impact_id", "theme_id", name="uq_event_security_impact_theme"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    impact_id: Mapped[int] = mapped_column(
+        ForeignKey("event_security_impacts.id", ondelete="CASCADE"), index=True
+    )
+    theme_id: Mapped[int] = mapped_column(
+        ForeignKey("themes.id", ondelete="CASCADE"), index=True
+    )
+
+    impact: Mapped[EventSecurityImpact] = relationship(back_populates="theme_links")
+    theme: Mapped[Theme] = relationship(back_populates="impact_links")
 
 
 class SecuritySignalSnapshot(Base):

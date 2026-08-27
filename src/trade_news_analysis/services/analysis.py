@@ -17,6 +17,7 @@ from ..models import (
     Event,
     EventArticle,
     EventSecurityImpact,
+    EventSecurityImpactTheme,
     EventTheme,
     Security,
     Theme,
@@ -67,8 +68,10 @@ def build_event_prompt(event: Event) -> str:
 2. observed_demand 说明已经发生的采购、交付、使用、价格或产能变化；若没有，明确写“仅有叙事”。
 3. themes 使用具体产业链主题。
 4. candidates 可提出一至三阶受益或受损上市公司，每个候选都要写清传导角色。
-5. 当事件直接影响黄金或美国国债时，可分别使用 GLD 或 GOVT 作为内部证据载体。
-6. evidence 只能摘述输入确实包含的事实。
+5. 候选 themes 必须从事件 themes 中原样选择 1-3 个，只绑定与该证券存在直接传导的主题。
+6. 当事件直接影响黄金或美国国债时，可分别使用 GLD 或 GOVT 作为内部证据载体。
+7. evidence 只能摘述输入确实包含的事实。
+8. 若输入是包含多个无关话题的综合报道，不得把某个话题的主题绑定到由其他话题推导出的候选证券。
 
 JSON Schema：
 {schema}
@@ -89,6 +92,7 @@ def build_impact_prompt(event: Event, security: Security, candidate: CandidateCo
 业务简介：{security.business_summary or "暂无可靠简介"}
 市值：{security.market_cap if security.market_cap is not None else "未知"}
 候选供应链角色：{candidate.supply_chain_role}
+候选关联主题：{"、".join(candidate.themes)}
 产业链层级：{candidate.chain_level}
 
 要求：
@@ -97,6 +101,7 @@ def build_impact_prompt(event: Event, security: Security, candidate: CandidateCo
 3. thesis 必须写清“事件 → 财务科目 → 证券影响”。
 4. evidence 只能使用事件或证券资料中已经给出的事实。
 5. 缺少业务或市值资料时降低 business_purity、scale_elasticity 和置信度。
+6. 只分析“候选关联主题”的传导；事件中的其他并列话题不得写入 thesis、催化剂或风险。
 
 JSON Schema：
 {schema}
@@ -203,6 +208,12 @@ class EventAnalyzer:
         )
         session.add(impact)
         session.flush()
+        for theme_name in candidate.themes:
+            theme = session.scalar(select(Theme).where(Theme.slug == _slug(theme_name)))
+            if theme is not None:
+                session.add(
+                    EventSecurityImpactTheme(impact_id=impact.id, theme_id=theme.id)
+                )
         try:
             payload, raw = self._validated_completion(
                 build_impact_prompt(event, security, candidate), ImpactPayload

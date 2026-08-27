@@ -164,6 +164,15 @@ def calculate_forecast(
         price_high = eps * float(item["pe_high"]) if eps is not None and eps > 0 else None
         cagr_low = _cagr(price_low, current_price, year_offset)
         cagr_high = _cagr(price_high, current_price, year_offset)
+        valuation = _valuation_comparison(
+            year=fiscal_year + year_offset if fiscal_year is not None else None,
+            current_price=current_price,
+            eps=eps,
+            pe_low=float(item["pe_low"]),
+            pe_high=float(item["pe_high"]),
+            price_low=price_low,
+            price_high=price_high,
+        )
         rows.append(
             {
                 "year_offset": year_offset,
@@ -180,6 +189,7 @@ def calculate_forecast(
                 "price_high": price_high,
                 "cagr_low": cagr_low,
                 "cagr_high": cagr_high,
+                **valuation,
             }
         )
         previous_revenue = projected_revenue
@@ -241,6 +251,7 @@ def analysis_response(
     if profile and profile.source_error:
         warnings.insert(0, profile.source_error)
     last_row = forecast[-1] if forecast else None
+    valuation = _current_valuation(forecast, effective_inputs["price"]["value"])
     summary = {
         "status": status,
         "year": last_row["year"] if last_row else None,
@@ -248,6 +259,12 @@ def analysis_response(
         "price_high": last_row["price_high"] if last_row else None,
         "cagr_low": last_row["cagr_low"] if last_row else None,
         "cagr_high": last_row["cagr_high"] if last_row else None,
+        "valuation_status": valuation["status"],
+        "valuation_label": valuation["label"],
+        "valuation_year": valuation["year"],
+        "current_implied_pe": valuation["current_implied_pe"],
+        "price_change_low": valuation["price_change_low"],
+        "price_change_high": valuation["price_change_high"],
         "updated_at": profile.updated_at if profile else None,
     }
     return {
@@ -271,11 +288,14 @@ def analysis_response(
         "effective_inputs": effective_inputs,
         "assumptions": assumptions,
         "forecast": forecast,
+        "valuation": valuation,
         "warnings": warnings,
         "summary": summary,
         "refresh_recommended": is_refresh_recommended(profile, now),
         "model_notes": [
             "市值仅展示，不参与估值计算。",
+            "当前估值判断使用第一预测年度 EPS 对应的隐含 PE；第四年用于观察长期目标空间和 CAGR。",
+            "“偏高/偏低”仅表示相对你填写的盈利与 PE 区间假设，不代表绝对价值判断。",
             "预测期内总股本保持不变，不包含分红、回购、稀释或汇率收益。",
             "15x/20x 是参考表默认假设，不构成投资建议。",
         ],
@@ -313,3 +333,108 @@ def _cagr(target_price: float | None, current_price: float | None, years: int) -
     ):
         return None
     return (target_price / current_price) ** (1 / years) - 1
+
+
+def _valuation_comparison(
+    *,
+    year: int | None,
+    current_price: float | None,
+    eps: float | None,
+    pe_low: float,
+    pe_high: float,
+    price_low: float | None,
+    price_high: float | None,
+) -> dict[str, Any]:
+    unavailable = {
+        "current_implied_pe": None,
+        "price_change_low": None,
+        "price_change_high": None,
+        "valuation_status": "unavailable",
+        "valuation_label": "暂无法判断",
+        "valuation_reason": "缺少有效当前价或正的预测 EPS，暂不能比较当前估值。",
+    }
+    if (
+        current_price is None
+        or current_price <= 0
+        or eps is None
+        or eps <= 0
+        or price_low is None
+        or price_high is None
+    ):
+        return unavailable
+
+    implied_pe = current_price / eps
+    price_change_low = price_low / current_price - 1
+    price_change_high = price_high / current_price - 1
+    year_label = str(year) if year is not None else "该年度"
+    basis = (
+        f"当前价 {current_price:.2f} ÷ {year_label} 年预测 EPS {eps:.2f} "
+        f"= {implied_pe:.2f}x 隐含 PE"
+    )
+    assumption_range = f"你设定的 {pe_low:.2f}x–{pe_high:.2f}x PE 区间"
+
+    if current_price < price_low:
+        return {
+            "current_implied_pe": implied_pe,
+            "price_change_low": price_change_low,
+            "price_change_high": price_change_high,
+            "valuation_status": "below_range",
+            "valuation_label": "当前价偏低",
+            "valuation_reason": f"{basis}，低于{assumption_range}。",
+        }
+    if current_price > price_high:
+        return {
+            "current_implied_pe": implied_pe,
+            "price_change_low": price_change_low,
+            "price_change_high": price_change_high,
+            "valuation_status": "above_range",
+            "valuation_label": "当前价偏高",
+            "valuation_reason": f"{basis}，高于{assumption_range}。",
+        }
+    return {
+        "current_implied_pe": implied_pe,
+        "price_change_low": price_change_low,
+        "price_change_high": price_change_high,
+        "valuation_status": "within_range",
+        "valuation_label": "当前价位于合理区间",
+        "valuation_reason": f"{basis}，位于{assumption_range}内。",
+    }
+
+
+def _current_valuation(
+    forecast: list[dict[str, Any]], current_price: float | None
+) -> dict[str, Any]:
+    row = forecast[0] if forecast else None
+    if row is None:
+        return {
+            "basis": "first_forecast_year",
+            "year": None,
+            "current_price": current_price,
+            "eps": None,
+            "pe_low": None,
+            "pe_high": None,
+            "price_low": None,
+            "price_high": None,
+            "current_implied_pe": None,
+            "price_change_low": None,
+            "price_change_high": None,
+            "status": "unavailable",
+            "label": "暂无法判断",
+            "reason": "缺少第一预测年度数据，暂不能判断当前估值。",
+        }
+    return {
+        "basis": "first_forecast_year",
+        "year": row["year"],
+        "current_price": current_price,
+        "eps": row["eps"],
+        "pe_low": row["pe_low"],
+        "pe_high": row["pe_high"],
+        "price_low": row["price_low"],
+        "price_high": row["price_high"],
+        "current_implied_pe": row["current_implied_pe"],
+        "price_change_low": row["price_change_low"],
+        "price_change_high": row["price_change_high"],
+        "status": row["valuation_status"],
+        "label": row["valuation_label"],
+        "reason": row["valuation_reason"],
+    }

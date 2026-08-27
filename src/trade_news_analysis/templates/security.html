@@ -33,6 +33,22 @@
       <div><span>总股本</span><strong>{% if pe_analysis.effective_inputs.shares_outstanding.value is not none %}{{ "{:,.0f}".format(pe_analysis.effective_inputs.shares_outstanding.value) }}{% else %}—{% endif %}</strong></div>
       <div><span>最近刷新</span><strong>{{ pe_analysis.source.fetched_at or "尚未刷新" }}</strong></div>
     </div>
+    <div class="valuation-verdict {{ pe_analysis.valuation.status }}">
+      <div class="valuation-verdict-heading">
+        <span>当前估值判断{% if pe_analysis.valuation.year %} · 基于 {{ pe_analysis.valuation.year }} 年预测{% endif %}</span>
+        <strong>{{ pe_analysis.valuation.label }}</strong>
+      </div>
+      {% if pe_analysis.valuation.status != "unavailable" %}
+      <div class="valuation-metrics">
+        <div><span>当前价</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_price) }} {{ security.currency }}</strong></div>
+        <div><span>近一年目标区间</span><strong>{{ "%.2f"|format(pe_analysis.valuation.price_low) }}–{{ "%.2f"|format(pe_analysis.valuation.price_high) }}</strong></div>
+        <div><span>当前隐含 PE</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_implied_pe) }}x</strong></div>
+        <div><span>目标价空间</span><strong>{{ "%+.1f"|format(pe_analysis.valuation.price_change_low * 100) }}% 至 {{ "%+.1f"|format(pe_analysis.valuation.price_change_high * 100) }}%</strong></div>
+      </div>
+      {% endif %}
+      <p>{{ pe_analysis.valuation.reason }}</p>
+      <p class="muted">结论表示当前价格相对你的近一年盈利预测和 PE 区间偏高或偏低；改变任一假设都会改变结论。</p>
+    </div>
     <details class="pe-overrides">
       <summary>人工覆盖基础数据（留空即使用自动值）</summary>
       <div class="pe-input-grid">
@@ -46,7 +62,22 @@
     </details>
     <div class="table-scroll">
       <table id="pe-table">
-        <thead><tr><th>年度</th><th>营收增速</th><th>营收</th><th>净利润增速</th><th>净利润</th><th>净利率</th><th>EPS</th><th>PE Low</th><th>PE High</th><th>目标价 Low</th><th>目标价 High</th><th>CAGR Low</th><th>CAGR High</th></tr></thead>
+        <colgroup>
+          <col class="pe-col-year">
+          <col class="pe-col-growth">
+          <col class="pe-col-amount">
+          <col class="pe-col-growth">
+          <col class="pe-col-amount">
+          <col class="pe-col-ratio">
+          <col class="pe-col-eps">
+          <col class="pe-col-pe">
+          <col class="pe-col-pe">
+          <col class="pe-col-price-range">
+          <col class="pe-col-return-range">
+          <col class="pe-col-cagr-range">
+          <col class="pe-col-verdict">
+        </colgroup>
+        <thead><tr><th>年度</th><th>营收增速</th><th>营收</th><th>净利润增速</th><th>净利润</th><th>净利率</th><th>EPS</th><th>PE Low</th><th>PE High</th><th>目标价区间</th><th>相对当前价</th><th>CAGR 区间</th><th>判断</th></tr></thead>
         <tbody>{% for row in pe_analysis.forecast %}<tr data-year-offset="{{ row.year_offset }}">
           <td><strong>{{ row.year or ("第 " ~ row.year_offset ~ " 年") }}</strong></td>
           <td><input data-assumption="revenue_growth" type="number" min="-99.99" step="0.1" value="{% if row.revenue_growth is not none %}{{ '%.2f'|format(row.revenue_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
@@ -57,10 +88,10 @@
           <td>{% if row.eps is not none %}{{ "%.2f"|format(row.eps) }}{% else %}—{% endif %}</td>
           <td><input data-assumption="pe_low" type="number" min="0.01" step="0.1" value="{{ row.pe_low }}"></td>
           <td><input data-assumption="pe_high" type="number" min="0.01" step="0.1" value="{{ row.pe_high }}"></td>
-          <td>{% if row.price_low is not none %}{{ "%.2f"|format(row.price_low) }}{% else %}—{% endif %}</td>
-          <td>{% if row.price_high is not none %}{{ "%.2f"|format(row.price_high) }}{% else %}—{% endif %}</td>
-          <td>{% if row.cagr_low is not none %}{{ "%.2f"|format(row.cagr_low * 100) }}%{% else %}—{% endif %}</td>
-          <td>{% if row.cagr_high is not none %}{{ "%.2f"|format(row.cagr_high * 100) }}%{% else %}—{% endif %}</td>
+          <td>{% if row.price_low is not none %}{{ "%.2f"|format(row.price_low) }}–{{ "%.2f"|format(row.price_high) }}{% else %}—{% endif %}</td>
+          <td>{% if row.price_change_low is not none %}{{ "%+.1f"|format(row.price_change_low * 100) }}%<br>{{ "%+.1f"|format(row.price_change_high * 100) }}%{% else %}—{% endif %}</td>
+          <td>{% if row.cagr_low is not none %}{{ "%+.2f"|format(row.cagr_low * 100) }}%<br>{{ "%+.2f"|format(row.cagr_high * 100) }}%{% else %}—{% endif %}</td>
+          <td><span class="valuation-label {{ row.valuation_status }}">{{ row.valuation_label }}</span>{% if row.current_implied_pe is not none %}<small>{{ "%.2f"|format(row.current_implied_pe) }}x</small>{% endif %}</td>
         </tr>{% endfor %}</tbody>
       </table>
     </div>

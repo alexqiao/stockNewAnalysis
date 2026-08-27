@@ -66,6 +66,59 @@ AKSHARE_ENABLED=true
 
 LLM_BASE_URL 可以替换为兼容 OpenAI Chat Completions 的服务。修改 .env 后需重启应用。
 
+## Telegram 机会日报
+
+系统可以在每周一至周五 08:30（Asia/Shanghai）向一个 Telegram 私人会话发送
+5 日信号 Top 5。日报沿用网页的跨市场机会口径：先选出美股 7 项和 A 股 3 项，
+再按综合分排序并发送前 5 项。每项机会会附上最新一篇支持新闻的原始来源链接。
+
+1. 在 Telegram 中打开 `@BotFather`，发送 `/newbot` 并保存生成的 Token。
+2. 打开新 Bot，发送 `/start`。Bot 不能在用户开始会话前主动发送私信。
+3. 先只配置 Token，再读取最近会话：
+
+~~~dotenv
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=your-bot-token
+~~~
+
+~~~bash
+uv run trade-news telegram-chats
+~~~
+
+4. 将输出的私人会话 ID 写入 `.env`，预览并测试发送：
+
+~~~dotenv
+TELEGRAM_CHAT_ID=your-private-chat-id
+TELEGRAM_DIGEST_TIMEZONE=Asia/Shanghai
+TELEGRAM_DIGEST_HOUR=8
+TELEGRAM_DIGEST_MINUTE=30
+TELEGRAM_DIGEST_HORIZON=5
+TELEGRAM_DIGEST_LIMIT=5
+# 可选；必须是手机可访问的部署地址，不能使用 127.0.0.1
+PUBLIC_BASE_URL=
+~~~
+
+~~~bash
+uv run trade-news telegram-digest --dry-run
+uv run trade-news telegram-digest
+~~~
+
+5. 测试成功后设置 `TELEGRAM_ENABLED=true` 并重启服务。内置调度器关闭时，
+定时日报也会关闭，但仍可使用 CLI 手动发送。
+
+服务运行后，可以直接在配置的私人聊天中发送：
+
+~~~text
+/digest  立即发送当前跨市场机会日报
+/help    查看可用指令
+~~~
+
+指令默认每 5 秒轮询一次，并将处理进度保存到
+`./data/telegram_update_offset`，避免应用重启后重复执行旧指令。Bot 使用
+`getUpdates` 接收指令，因此不能同时配置 Telegram webhook。
+
+Token 只应保存在本地环境变量中。程序不会将 Token 写入数据库或日志。
+
 ## 常用 API
 
 ~~~bash

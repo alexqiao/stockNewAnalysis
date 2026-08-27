@@ -15,6 +15,7 @@ from trade_news_analysis.config import Settings
 from trade_news_analysis.db import SessionFactory
 from trade_news_analysis.main import create_app
 from trade_news_analysis.models import EventSecurityImpact, Security
+from trade_news_analysis.services import opportunities as opportunity_service
 from trade_news_analysis.services.analysis import EventAnalyzer
 from trade_news_analysis.services.coordinator import PipelineCoordinator
 from trade_news_analysis.services.evaluation import OutcomeEvaluator
@@ -154,7 +155,7 @@ def test_dashboard_opportunities_aggregate_industries_and_macro_assets() -> None
         },
     ]
 
-    trends = api_module._aggregate_trend_opportunities(rows, {4: ["机器人"]})
+    trends = api_module._aggregate_trend_opportunities(rows, {(5, 4): ["机器人"]})
 
     assert {item["name"] for item in trends} == {"半导体", "黄金", "美债", "机器人"}
     assert all("security" not in item for item in trends)
@@ -178,24 +179,94 @@ def test_dashboard_opportunities_aggregate_industries_and_macro_assets() -> None
     )
 
 
-def test_dashboard_opportunities_keeps_selected_market(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    calls: list[tuple[str | None, int]] = []
+def test_dashboard_opportunities_prefer_specific_theme_over_broad_industry() -> None:
+    rows = [
+        {
+            "security": {
+                "id": 1,
+                "market": "US",
+                "symbol": "VELO",
+                "industry": "Computer Hardware",
+            },
+            "signal": {
+                "score": 60,
+                "confidence": 0.6,
+                "conflict": 0.1,
+                "evidence_event_ids": [1, 2, 3],
+            },
+        },
+        {
+            "security": {
+                "id": 2,
+                "market": "US",
+                "symbol": "GENERIC",
+                "industry": "Computer Hardware",
+            },
+            "signal": {
+                "score": 40,
+                "confidence": 0.5,
+                "conflict": 0.1,
+                "evidence_event_ids": [4],
+            },
+        },
+    ]
 
-    def fake_list_opportunities(
-        _request: Any,
-        market: str | None,
-        _theme: str | None,
-        _horizon: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        calls.append((market, limit))
-        return [
+    trends = api_module._aggregate_trend_opportunities(
+        rows,
+        {
+            (1, 1): ["航天级金属增材制造（3D打印）设备", "商业航天"],
+            (1, 2): ["金属增材制造(3D打印)"],
+            (1, 3): ["航空航天供应链"],
+        },
+    )
+
+    velo = next(item for item in trends if item["security_ids"] == [1])
+    generic = next(item for item in trends if item["security_ids"] == [2])
+    assert velo["name"] == "金属增材制造(3D打印)"
+    assert velo["kind"] == "theme"
+    assert velo["type"] == "产业主题"
+    assert generic["name"] == "Computer Hardware"
+    assert generic["kind"] == "industry"
+
+
+def test_infer_impact_theme_ignores_unrelated_topics_in_combined_event() -> None:
+    event_themes = [
+        "AI医疗临床应用",
+        "算力金属（AI服务器/光模块/数据中心用金属材料）",
+        "一线城市房地产局部回暖",
+    ]
+    metal_impact = EventSecurityImpact(
+        thesis=(
+            "AI服务器、光模块和数据中心推升算力金属需求，铜价上涨改善矿企收入。"
+            "AI医疗与该公司无直接传导，不纳入正面驱动。"
+        ),
+        financial_channels=["金属销售价格", "毛利率"],
+        catalysts=[],
+    )
+    medical_impact = EventSecurityImpact(
+        thesis=(
+            "AI医疗临床落地带动医院采购智能影像设备，进而增加设备收入。"
+            "算力金属涨价与其业务无直接传导。"
+        ),
+        financial_channels=["医疗设备收入"],
+        catalysts=[],
+    )
+
+    assert api_module._infer_impact_themes(metal_impact, event_themes) == [
+        "算力金属（AI服务器/光模块/数据中心用金属材料）"
+    ]
+    assert api_module._infer_impact_themes(medical_impact, event_themes) == [
+        "AI医疗临床应用"
+    ]
+
+
+def test_dashboard_opportunities_keeps_selected_market() -> None:
+    all_opportunities = opportunity_service.aggregate_trend_opportunities(
+        [
             {
                 "security": {
                     "id": index,
-                    "market": market,
+                    "market": "A",
                     "symbol": f"A{index}",
                     "industry": f"行业{index}",
                 },
@@ -207,31 +278,23 @@ def test_dashboard_opportunities_keeps_selected_market(
                 },
             }
             for index in range(12)
-        ]
-
-    monkeypatch.setattr(api_module, "list_opportunities", fake_list_opportunities)
-
-    request: Any = object()
-    rows = api_module._dashboard_opportunities(request, "A", "机器人", 5)
+        ],
+        {},
+        None,
+    )
+    rows = opportunity_service.select_dashboard_opportunities(
+        all_opportunities, "A", "机器人", 5
+    )
 
     assert len(rows) == 10
-    assert calls == [("A", 200)]
     assert rows[0]["detail_url"].startswith("/opportunities/industry?")
     assert "market=A" in rows[0]["detail_url"]
     assert "%E6%9C%BA%E5%99%A8%E4%BA%BA" in rows[0]["detail_url"]
 
 
-def test_dashboard_opportunities_apply_us_a_quota_by_primary_market(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    def fake_list_opportunities(
-        _request: Any,
-        _market: str | None,
-        _theme: str | None,
-        _horizon: int,
-        _limit: int,
-    ) -> list[dict[str, Any]]:
-        return [
+def test_dashboard_opportunities_apply_us_a_quota_by_primary_market() -> None:
+    all_opportunities = opportunity_service.aggregate_trend_opportunities(
+        [
             {
                 "security": {
                     "id": index,
@@ -247,12 +310,13 @@ def test_dashboard_opportunities_apply_us_a_quota_by_primary_market(
                 },
             }
             for index, item_market in enumerate(["A"] * 12 + ["US"] * 12 + ["HK"] * 4)
-        ]
-
-    monkeypatch.setattr(api_module, "list_opportunities", fake_list_opportunities)
-    request: Any = object()
-
-    rows = api_module._dashboard_opportunities(request, None, None, 5)
+        ],
+        {},
+        None,
+    )
+    rows = opportunity_service.select_dashboard_opportunities(
+        all_opportunities, None, None, 5
+    )
 
     assert len(rows) == 10
     assert sum(item["primary_market"] == "US" for item in rows) == 7
@@ -361,14 +425,14 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
         opportunity_section = dashboard.text.split("跨市场机会榜", 1)[1].split(
             "自选股当前研判", 1
         )[0]
-        assert "消费电子" in opportunity_section
+        assert "企业软件" in opportunity_section
         assert "Apple Inc." not in opportunity_section
         assert "/securities/" not in opportunity_section
-        assert "/opportunities/industry?" in opportunity_section
+        assert "/opportunities/theme?" in opportunity_section
 
         detail = client.get(
-            "/opportunities/industry",
-            params={"name": "消费电子", "horizon": 5},
+            "/opportunities/theme",
+            params={"name": "企业软件", "horizon": 5},
         )
         assert detail.status_code == 200
         assert "最可能涉及的股票" in detail.text
@@ -555,6 +619,9 @@ def test_pe_analysis_refresh_save_persistence_and_watchlist_access(
         assert saved.json()["status"] == "ready"
         assert saved.json()["effective_inputs"]["price"]["provenance"] == "manual"
         assert saved.json()["forecast"][0]["cagr_low"] is not None
+        assert saved.json()["forecast"][0]["price_change_low"] is not None
+        assert saved.json()["valuation"]["year"] == 2025
+        assert "隐含 PE" in saved.json()["valuation"]["reason"]
 
         cleared = client.put(
             endpoint,
@@ -580,7 +647,10 @@ def test_pe_analysis_refresh_save_persistence_and_watchlist_access(
         page = client.get(f"/securities/{aapl_id}")
         assert page.status_code == 200
         assert "四年 PE 估值" in page.text
+        assert "当前估值判断" in page.text
+        assert "相对当前价" in page.text
         assert 'data-assumption="revenue_growth"' in page.text
+        assert 'class="pe-col-growth"' in page.text
 
         assert client.put(
             "/api/v1/watchlist",

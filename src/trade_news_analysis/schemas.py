@@ -23,6 +23,7 @@ class CandidateCompany(BaseModel):
     market: Market | None = None
     supply_chain_role: str = Field(min_length=1, max_length=300)
     chain_level: int = Field(default=1, ge=1, le=3)
+    themes: list[str] = Field(min_length=1, max_length=3)
 
 
 class EventPayload(BaseModel):
@@ -32,6 +33,17 @@ class EventPayload(BaseModel):
     themes: list[str] = Field(min_length=1, max_length=8)
     candidates: list[CandidateCompany] = Field(max_length=30)
     evidence: list[str] = Field(max_length=12)
+
+    @model_validator(mode="after")
+    def candidate_themes_must_belong_to_event(self) -> Self:
+        event_themes = set(self.themes)
+        for candidate in self.candidates:
+            unknown = set(candidate.themes) - event_themes
+            if unknown:
+                raise ValueError(
+                    f"候选 {candidate.name} 引用了事件外主题：{sorted(unknown)}"
+                )
+        return self
 
 
 class ImpactPayload(BaseModel):

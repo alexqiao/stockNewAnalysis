@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 
@@ -12,6 +13,9 @@ from .analysis import EventAnalyzer
 from .evaluation import OutcomeEvaluator
 from .ingestion import IngestionService, SourceFactory
 from .scoring import rebuild_signal_snapshots
+from .telegram import TelegramCommandService, TelegramDigestService
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineBusyError(RuntimeError):
@@ -36,6 +40,16 @@ class PipelineCoordinator:
         self.settings = settings
         self.analyzer = analyzer or EventAnalyzer(settings)
         self.evaluator = evaluator or OutcomeEvaluator(settings=settings)
+        self.telegram = (
+            TelegramDigestService(session_factory, settings)
+            if settings.telegram_configured
+            else None
+        )
+        self.telegram_commands = (
+            TelegramCommandService(settings, self.telegram)
+            if self.telegram is not None
+            else None
+        )
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="news-pipeline")
         self._lock = threading.Lock()
         self._pipeline_future: Future[None] | None = None
@@ -72,6 +86,35 @@ class PipelineCoordinator:
     def _execute_evaluation(self) -> int:
         with self.session_factory() as session:
             return self.evaluator.evaluate(session)
+
+    def submit_telegram_digest(self) -> Future[None]:
+        if self.telegram is None:
+            raise RuntimeError("Telegram 未配置")
+        return self.executor.submit(self._execute_telegram_digest)
+
+    def _execute_telegram_digest(self) -> None:
+        assert self.telegram is not None
+        try:
+            self.telegram.send_digest()
+        except Exception as exc:
+            logger.error(
+                "Telegram digest delivery failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    def poll_telegram_commands(self) -> int:
+        if self.telegram_commands is None:
+            raise RuntimeError("Telegram 未配置")
+        try:
+            return self.telegram_commands.poll()
+        except Exception as exc:
+            logger.error(
+                "Telegram command polling failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return 0
 
     @property
     def busy(self) -> bool:

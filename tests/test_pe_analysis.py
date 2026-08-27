@@ -39,6 +39,11 @@ def test_calculate_forecast_ties_to_amd_reference_workbook() -> None:
     assert status == "ready"
     assert warnings == []
     assert rows[0]["cagr_low"] == pytest.approx(77.3139710779084 / 150.77 - 1)
+    assert rows[0]["current_implied_pe"] == pytest.approx(
+        150.77 / (3_910_465_642 * 2.13 / 1_616_000_000)
+    )
+    assert rows[0]["valuation_status"] == "above_range"
+    assert rows[0]["valuation_label"] == "当前价偏高"
     assert rows[-1]["revenue"] == pytest.approx(67_106_911_592.36)
     assert rows[-1]["eps"] == pytest.approx(11.32391963054432)
     assert rows[-1]["price_low"] == pytest.approx(169.85879445816482)
@@ -78,6 +83,44 @@ def test_analysis_response_prefers_manual_overrides() -> None:
     }
     assert result["effective_inputs"]["revenue"]["provenance"] == "auto"
     assert result["forecast"][0]["year"] == 2025
+    assert result["valuation"]["basis"] == "first_forecast_year"
+    assert result["valuation"]["year"] == 2025
+    assert result["summary"]["valuation_label"] == result["valuation"]["label"]
+
+
+@pytest.mark.parametrize(
+    ("current_price", "expected_status", "expected_label"),
+    [
+        (10, "below_range", "当前价偏低"),
+        (17, "within_range", "当前价位于合理区间"),
+        (25, "above_range", "当前价偏高"),
+    ],
+)
+def test_current_price_is_compared_with_forward_pe_range(
+    current_price: float, expected_status: str, expected_label: str
+) -> None:
+    complete = [
+        {**item, "revenue_growth": 0.0, "net_income_growth": 0.0}
+        for item in default_assumptions()
+    ]
+
+    status, rows, warnings = calculate_forecast(
+        fiscal_year=2024,
+        current_price=current_price,
+        revenue=1_000,
+        net_income=100,
+        shares_outstanding=100,
+        assumptions=complete,
+    )
+
+    assert status == "ready"
+    assert warnings == []
+    assert rows[0]["current_implied_pe"] == pytest.approx(current_price)
+    assert rows[0]["price_change_low"] == pytest.approx(15 / current_price - 1)
+    assert rows[0]["price_change_high"] == pytest.approx(20 / current_price - 1)
+    assert rows[0]["valuation_status"] == expected_status
+    assert rows[0]["valuation_label"] == expected_label
+    assert "隐含 PE" in rows[0]["valuation_reason"]
 
 
 def test_negative_earnings_and_missing_inputs_are_guarded() -> None:
@@ -96,6 +139,7 @@ def test_negative_earnings_and_missing_inputs_are_guarded() -> None:
     assert status == "not_applicable"
     assert all(row["eps"] < 0 for row in rows)
     assert all(row["price_low"] is None and row["cagr_low"] is None for row in rows)
+    assert all(row["valuation_status"] == "unavailable" for row in rows)
     assert any("EPS 非正" in warning for warning in warnings)
 
     missing_status, _, missing_warnings = calculate_forecast(

@@ -9,7 +9,7 @@ __pycache__/
 htmlcov/
 data/*.db
 data/*.db-*
+data/telegram_update_offset*
 dist/
 build/
 *.egg-info/
-

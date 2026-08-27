@@ -24,6 +24,12 @@ def start_scheduler(settings: Settings, coordinator: PipelineCoordinator) -> Bac
     def scheduled_evaluation() -> None:
         coordinator.submit_evaluation()
 
+    def scheduled_telegram_digest() -> None:
+        coordinator.submit_telegram_digest()
+
+    def scheduled_telegram_commands() -> None:
+        coordinator.poll_telegram_commands()
+
     scheduler.add_job(
         scheduled_pipeline,
         "interval",
@@ -42,5 +48,25 @@ def start_scheduler(settings: Settings, coordinator: PipelineCoordinator) -> Bac
         max_instances=1,
         coalesce=True,
     )
+    if settings.telegram_enabled:
+        scheduler.add_job(
+            scheduled_telegram_digest,
+            "cron",
+            day_of_week="mon-fri",
+            hour=settings.telegram_digest_hour,
+            minute=settings.telegram_digest_minute,
+            timezone=settings.telegram_digest_timezone,
+            id="telegram-opportunity-digest",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            scheduled_telegram_commands,
+            "interval",
+            seconds=settings.telegram_command_poll_seconds,
+            id="telegram-command-polling",
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     return scheduler

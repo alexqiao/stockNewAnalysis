@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -28,6 +27,7 @@ from .models import (
     Watchlist,
 )
 from .schemas import PEAnalysisUpdate, RunResponse, WatchlistInput, WatchlistReplace
+from .services import opportunities as opportunity_service
 from .services.coordinator import PipelineBusyError, PipelineCoordinator
 from .services.metrics import build_metrics
 from .services.pe_analysis import (
@@ -44,9 +44,6 @@ api_router = APIRouter(prefix="/api/v1")
 web_router = APIRouter()
 VALID_HORIZONS = {1, 5, 20}
 VALID_MARKETS = {"A", "HK", "US"}
-DASHBOARD_OPPORTUNITY_LIMIT = 10
-DASHBOARD_OPPORTUNITY_SOURCE_LIMIT = 200
-DASHBOARD_MARKET_LIMITS = {"US": 7, "A": 3}
 OPPORTUNITY_KINDS = {"industry", "macro", "theme"}
 
 
@@ -329,129 +326,16 @@ def list_opportunities(
     if horizon not in VALID_HORIZONS:
         raise HTTPException(status_code=422, detail="horizon 只能是 1、5 或 20")
     with _session(request) as session:
-        allowed_ids: set[int] | None = None
-        if theme:
-            event_ids = set(
-                session.scalars(
-                    select(EventTheme.event_id)
-                    .join(Theme)
-                    .where((Theme.slug == theme) | (Theme.name == theme))
-                )
-            )
-            allowed_ids = set(
-                session.scalars(
-                    select(EventSecurityImpact.security_id).where(
-                        EventSecurityImpact.event_id.in_(event_ids),
-                        EventSecurityImpact.is_current.is_(True),
-                    )
-                )
-            ) if event_ids else set()
-        snapshots = _latest_snapshot_map(session, horizon, allowed_ids)
-        query = select(Security).where(Security.id.in_(snapshots))
-        if market:
-            query = query.where(Security.market == market)
-        securities = {item.id: item for item in session.scalars(query)}
-        rows = []
-        for security_id, snapshot in snapshots.items():
-            if security_id not in securities or snapshot.score <= 0:
-                continue
-            signal = _signal_dict(snapshot)
-            if signal is not None:
-                rows.append(
-                    {"security": _security_brief(securities[security_id]), "signal": signal}
-                )
-        rows.sort(key=lambda item: item["signal"]["score"], reverse=True)
-        return rows[:limit]
+        return opportunity_service.list_security_opportunities(
+            session, market, theme, horizon, limit
+        )
 
 
-def _aggregate_trend_opportunities(
-    rows: list[dict[str, Any]],
-    themes_by_event: dict[int, list[str]],
-    limit: int | None = DASHBOARD_OPPORTUNITY_LIMIT,
-) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        security = row["security"]
-        signal = row["signal"]
-        macro_group = str(security.get("opportunity_group") or "").strip()
-        industry = str(security.get("industry") or "").strip()
-        opportunity_kind = "macro" if macro_group else "industry"
-        opportunity_type = "宏观资产" if macro_group else "行业"
-        name = macro_group or industry
-        if not name:
-            theme_counts = Counter(
-                theme_name
-                for event_id in signal.get("evidence_event_ids", [])
-                for theme_name in themes_by_event.get(event_id, [])
-            )
-            if theme_counts:
-                name = min(theme_counts, key=lambda item: (-theme_counts[item], item))
-                opportunity_kind = "theme"
-                opportunity_type = "产业主题"
-            else:
-                name = f"{security['market']} 其他行业"
-
-        key = (opportunity_kind, name)
-        group = groups.setdefault(
-            key,
-            {
-                "name": name,
-                "kind": opportunity_kind,
-                "type": opportunity_type,
-                "markets": set(),
-                "market_weights": {},
-                "security_ids": set(),
-                "event_ids": set(),
-                "weight": 0.0,
-                "weighted_score": 0.0,
-                "weighted_confidence": 0.0,
-                "weighted_conflict": 0.0,
-            },
-        )
-        group["markets"].add(
-            security.get("opportunity_scope") or security["market"]
-        )
-        group["security_ids"].add(security["id"])
-        group["event_ids"].update(signal.get("evidence_event_ids", []))
-        weight = max(float(signal["confidence"]), 0.01)
-        market_weight = abs(float(signal["score"])) * weight
-        group["market_weights"][security["market"]] = (
-            group["market_weights"].get(security["market"], 0.0) + market_weight
-        )
-        group["weight"] += weight
-        group["weighted_score"] += float(signal["score"]) * weight
-        group["weighted_confidence"] += float(signal["confidence"]) * weight
-        group["weighted_conflict"] += float(signal["conflict"]) * weight
-
-    result = []
-    for group in groups.values():
-        weight = group["weight"]
-        score = group["weighted_score"] / weight
-        primary_market = max(
-            group["market_weights"],
-            key=lambda market: (group["market_weights"][market], market),
-        )
-        result.append(
-            {
-                "name": group["name"],
-                "kind": group["kind"],
-                "type": group["type"],
-                "markets": sorted(group["markets"]),
-                "primary_market": primary_market,
-                "score": round(score, 2),
-                "direction": "bullish" if score > 5 else "bearish" if score < -5 else "neutral",
-                "confidence": round(group["weighted_confidence"] / weight, 4),
-                "conflict": round(group["weighted_conflict"] / weight, 4),
-                "evidence_count": len(group["security_ids"]),
-                "security_ids": sorted(group["security_ids"]),
-                "event_ids": sorted(group["event_ids"]),
-            }
-        )
-    result.sort(key=lambda item: item["score"], reverse=True)
-    visible = result if limit is None else result[:limit]
-    for rank, item in enumerate(visible, 1):
-        item["rank"] = rank
-    return visible
+# Keep the existing private module surface while using one shared implementation.
+_aggregate_trend_opportunities = opportunity_service.aggregate_trend_opportunities
+_infer_impact_themes = opportunity_service.infer_impact_themes
+_themes_are_similar = opportunity_service.themes_are_similar
+_opportunity_url = opportunity_service.opportunity_url
 
 
 def _trend_opportunities(
@@ -461,40 +345,10 @@ def _trend_opportunities(
     horizon: int,
     limit: int | None,
 ) -> list[dict[str, Any]]:
-    rows = list_opportunities(
-        request, market, theme, horizon, DASHBOARD_OPPORTUNITY_SOURCE_LIMIT
-    )
-    event_ids = {
-        event_id
-        for row in rows
-        if not row["security"].get("industry")
-        and not row["security"].get("opportunity_group")
-        for event_id in row["signal"].get("evidence_event_ids", [])
-    }
-    themes_by_event: dict[int, list[str]] = {}
-    if event_ids:
-        with _session(request) as session:
-            for event_id, theme_name in session.execute(
-                select(EventTheme.event_id, Theme.name)
-                .join(Theme, EventTheme.theme_id == Theme.id)
-                .where(EventTheme.event_id.in_(event_ids))
-            ):
-                themes_by_event.setdefault(event_id, []).append(theme_name)
-    return _aggregate_trend_opportunities(rows, themes_by_event, limit)
-
-
-def _opportunity_url(
-    opportunity: dict[str, Any],
-    horizon: int,
-    market: str | None,
-    theme: str | None,
-) -> str:
-    params: dict[str, str | int] = {"name": opportunity["name"], "horizon": horizon}
-    if market:
-        params["market"] = market
-    if theme:
-        params["theme"] = theme
-    return f"/opportunities/{opportunity['kind']}?{urlencode(params)}"
+    with _session(request) as session:
+        return opportunity_service.trend_opportunities(
+            session, market, theme, horizon, limit
+        )
 
 
 def _dashboard_opportunities(
@@ -503,27 +357,10 @@ def _dashboard_opportunities(
     theme: str | None,
     horizon: int,
 ) -> list[dict[str, Any]]:
-    all_opportunities = _trend_opportunities(request, market, theme, horizon, None)
-    if market:
-        opportunities = all_opportunities[:DASHBOARD_OPPORTUNITY_LIMIT]
-    else:
-        opportunities = [
-            opportunity
-            for quota_market, limit in DASHBOARD_MARKET_LIMITS.items()
-            for opportunity in [
-                item
-                for item in all_opportunities
-                if item["primary_market"] == quota_market
-            ][:limit]
-        ]
-        opportunities.sort(key=lambda item: item["score"], reverse=True)
-        for rank, opportunity in enumerate(opportunities, 1):
-            opportunity["rank"] = rank
-    for opportunity in opportunities:
-        opportunity["detail_url"] = _opportunity_url(
-            opportunity, horizon, market, theme
+    with _session(request) as session:
+        return opportunity_service.dashboard_opportunities(
+            session, market, theme, horizon
         )
-    return opportunities
 
 
 def _unique_impact_values(
@@ -664,8 +501,25 @@ def _opportunity_detail(
         defining_impacts = [
             impact for impact in impacts if impact.security_id in security_ids
         ]
-        event_rows = [_event_dict(event) for event in events[:10]]
-        stocks = _related_stock_rows(impacts, horizon)
+        event_rows = []
+        for event in events[:10]:
+            row = _event_dict(event)
+            relevant_impacts = [
+                impact for impact in defining_impacts if impact.event_id == event.id
+            ]
+            row["themes"] = [
+                item
+                for item in row["themes"]
+                if _themes_are_similar(item["name"], opportunity["name"])
+            ]
+            row["opportunity_evidence"] = _unique_impact_values(
+                relevant_impacts, "evidence", 3
+            )
+            row["opportunity_theses"] = _unique_impact_values(
+                relevant_impacts, "thesis", 3
+            )
+            event_rows.append(row)
+        stocks = _related_stock_rows(defining_impacts, horizon)
 
     back_params: dict[str, str | int] = {"horizon": horizon}
     if market:

@@ -30,6 +30,7 @@ VALID_EVENT_PAYLOAD = {
             "market": "US",
             "supply_chain_role": "直接提供付费服务",
             "chain_level": 1,
+            "themes": ["企业软件"],
         },
         {
             "name": "Imaginary Rocket",
@@ -37,6 +38,7 @@ VALID_EVENT_PAYLOAD = {
             "market": "US",
             "supply_chain_role": "无法验证的候选",
             "chain_level": 2,
+            "themes": ["企业软件"],
         },
     ],
     "evidence": ["摘要称企业客户已经开始付费"],
@@ -118,6 +120,7 @@ def test_two_stage_analysis_resolves_only_known_security(
     assert impact is not None
     assert impact.security.symbol == "AAPL"
     assert impact.opportunity_score > 0
+    assert [link.theme.name for link in impact.theme_links] == ["企业软件"]
     assert result.unresolved_candidates[0]["symbol"] == "FAKE"
 
 
