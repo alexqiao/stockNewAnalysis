@@ -7,6 +7,7 @@
   <div class="metric"><span>整体状态</span><strong>{{ health.status }}</strong></div>
   <div class="metric"><span>LLM</span><strong>{{ "已配置" if health.llm_configured else "未配置" }}</strong></div>
   <div class="metric"><span>Tushare</span><strong>{{ "已配置" if health.tushare_configured else "免费降级" }}</strong></div>
+  <div class="metric"><span>语义聚类</span><strong>{% if not health.semantic_clustering.enabled %}未启用{% elif health.semantic_clustering.lexical_fallback %}词法回退{% else %}已启用{% endif %}</strong></div>
   <div class="metric"><span>流水线</span><strong>{{ "运行中" if health.pipeline_busy else "空闲" }}</strong></div>
 </div>
 <section class="analysis-panel"><h2>市场覆盖</h2><div class="signals">{% for market, coverage in health.market_coverage.items() %}<span class="tag">{{ market }} · {{ coverage }}</span>{% endfor %}</div></section>

@@ -888,6 +888,7 @@ def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[
 
 @api_router.get("/health")
 def health(request: Request) -> dict[str, Any]:
+    semantic_clustering = _coordinator(request).ingestion.semantic_matcher.status()
     with _session(request) as session:
         sources = session.scalars(select(SourceHealth).order_by(SourceHealth.source)).all()
         latest_run = session.scalar(select(IngestionRun).order_by(IngestionRun.id.desc()).limit(1))
@@ -910,6 +911,7 @@ def health(request: Request) -> dict[str, Any]:
             },
             "llm_configured": request.app.state.settings.llm_configured,
             "tushare_configured": request.app.state.settings.tushare_configured,
+            "semantic_clustering": semantic_clustering,
             "scheduler_enabled": request.app.state.settings.scheduler_enabled,
             "pipeline_busy": _coordinator(request).busy,
             "latest_run": (

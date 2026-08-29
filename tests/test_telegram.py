@@ -270,6 +270,7 @@ def test_scheduler_registers_weekday_shanghai_digest(monkeypatch: MonkeyPatch) -
         telegram_enabled=True,
         telegram_bot_token=SecretStr("token"),
         telegram_chat_id="123",
+        telegram_command_poll_seconds=5,
     )
     coordinator: Any = FakeCoordinator()
     scheduler: Any = scheduler_module.start_scheduler(settings, coordinator)

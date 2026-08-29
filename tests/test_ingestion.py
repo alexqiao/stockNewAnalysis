@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -44,6 +45,23 @@ def no_master(_settings: Settings) -> None:
     return None
 
 
+class FakeSemanticMatcher:
+    def __init__(self, scores: list[float] | None):
+        self.scores = scores
+
+    def similarities(self, _query: str, _candidates: Sequence[str]) -> list[float] | None:
+        return self.scores
+
+    def status(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "dependency_available": True,
+            "model": "fake",
+            "lexical_fallback": self.scores is None,
+            "error": None,
+        }
+
+
 def test_ingestion_clusters_duplicate_reports_into_one_event(
     session_factory: SessionFactory, settings: Settings
 ) -> None:
@@ -69,6 +87,110 @@ def test_ingestion_clusters_duplicate_reports_into_one_event(
         assert run is not None
         assert run.articles_seen == 3
         assert run.articles_new == 0
+
+
+def test_semantic_clustering_selects_best_cross_language_candidate(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    enabled_settings = settings.model_copy(update={"semantic_clustering_enabled": True})
+    service = IngestionService(
+        session_factory,
+        enabled_settings,
+        source_factory=lambda _securities, _settings: [],
+        master_factory=no_master,
+        semantic_matcher=FakeSemanticMatcher([0.84, 0.91]),
+    )
+    with session_factory() as session:
+        session.add_all(
+            [
+                Article(
+                    fingerprint="a" * 64,
+                    canonical_url="https://example.com/preview",
+                    source="Wire A",
+                    title="NVIDIA previews a new accelerator",
+                    published_at=datetime(2026, 8, 20, 10, tzinfo=UTC),
+                    story_cluster_id="preview-cluster",
+                ),
+                Article(
+                    fingerprint="b" * 64,
+                    canonical_url="https://example.com/launch",
+                    source="Wire B",
+                    title="NVIDIA launches the Blackwell accelerator",
+                    published_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
+                    story_cluster_id="launch-cluster",
+                ),
+            ]
+        )
+        session.commit()
+        cluster_id = service._cluster_id(
+            session,
+            NormalizedArticle(
+                source="中文财经",
+                title="英伟达正式发布 Blackwell 加速器",
+                summary="",
+                url="https://example.cn/blackwell",
+                published_at=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            ),
+        )
+    assert cluster_id == "launch-cluster"
+
+
+def test_semantic_clustering_respects_threshold_and_lexical_fallback(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    enabled_settings = settings.model_copy(update={"semantic_clustering_enabled": True})
+    with session_factory() as session:
+        session.add(
+            Article(
+                fingerprint="c" * 64,
+                canonical_url="https://example.com/existing",
+                source="Wire",
+                title="Apple expands its paid enterprise service",
+                published_at=datetime(2026, 8, 20, 10, tzinfo=UTC),
+                story_cluster_id="existing-cluster",
+            )
+        )
+        session.commit()
+        below_threshold = IngestionService(
+            session_factory,
+            enabled_settings,
+            source_factory=lambda _securities, _settings: [],
+            master_factory=no_master,
+            semantic_matcher=FakeSemanticMatcher([0.81]),
+        )
+        unrelated = NormalizedArticle(
+            source="Wire",
+            title="Microsoft opens a new research laboratory",
+            summary="",
+            url="https://example.com/research",
+            published_at=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        )
+        assert below_threshold._cluster_id(session, unrelated) != "existing-cluster"
+
+        at_threshold = IngestionService(
+            session_factory,
+            enabled_settings,
+            source_factory=lambda _securities, _settings: [],
+            master_factory=no_master,
+            semantic_matcher=FakeSemanticMatcher([0.82]),
+        )
+        assert at_threshold._cluster_id(session, unrelated) == "existing-cluster"
+
+        lexical_fallback = IngestionService(
+            session_factory,
+            enabled_settings,
+            source_factory=lambda _securities, _settings: [],
+            master_factory=no_master,
+            semantic_matcher=FakeSemanticMatcher(None),
+        )
+        duplicate = NormalizedArticle(
+            source="Another Wire",
+            title="Apple expands its paid enterprise service!",
+            summary="",
+            url="https://example.com/duplicate",
+            published_at=datetime(2026, 8, 20, 13, tzinfo=UTC),
+        )
+        assert lexical_fallback._cluster_id(session, duplicate) == "existing-cluster"
 
 
 def test_source_failure_is_recorded_without_crashing_run(

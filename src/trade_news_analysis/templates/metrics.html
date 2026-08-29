@@ -12,9 +12,13 @@
   <div class="metric"><span>方向命中率</span><strong>{% if metrics.hit_rate is not none %}{{ "%.1f"|format(metrics.hit_rate * 100) }}%{% else %}—{% endif %}</strong></div>
   <div class="metric"><span>平均超额收益</span><strong>{% if metrics.average_excess_return_pct is not none %}{{ "%.2f"|format(metrics.average_excess_return_pct) }}%{% else %}—{% endif %}</strong></div>
   <div class="metric"><span>排序相关性</span><strong>{% if metrics.rank_correlation is not none %}{{ "%.2f"|format(metrics.rank_correlation) }}{% else %}—{% endif %}</strong></div>
+  <div class="metric"><span>平均 Rank IC</span><strong>{% if metrics.rank_ic_mean is not none %}{{ "%.3f"|format(metrics.rank_ic_mean) }}{% else %}—{% endif %}</strong></div>
+  <div class="metric"><span>Rank ICIR</span><strong>{% if metrics.rank_icir is not none %}{{ "%.3f"|format(metrics.rank_icir) }}{% else %}—{% endif %}</strong></div>
+  <div class="metric"><span>有效横截面</span><strong>{{ metrics.rank_ic_periods }}</strong></div>
 </div>
 {% if metrics.evidence == "insufficient" %}<div class="notice">样本少于 30 条，当前结果只用于记录，不能证明存在稳定优势。</div>{% endif %}
-<section class="analysis-panel"><h2>分市场</h2><table><thead><tr><th>市场</th><th>样本</th><th>命中率</th><th>平均超额收益</th><th>A股涨停触及</th></tr></thead><tbody>
-{% for name, item in metrics.by_market.items() %}<tr><td>{{ name }}</td><td>{{ item.sample_size }}</td><td>{{ "%.1f"|format(item.hit_rate * 100) ~ "%" if item.hit_rate is not none else "—" }}</td><td>{{ "%.2f"|format(item.average_excess_return_pct) ~ "%" if item.average_excess_return_pct is not none else "—" }}</td><td>{{ "%.1f"|format(item.limit_up_hit_rate * 100) ~ "%" if item.limit_up_hit_rate is not none else "—" }}</td></tr>{% endfor %}
+<div class="notice">Rank IC 按市场、周期和信号生成时间计算完整横截面；ICIR 未年化，样本不足不代表存在稳定优势。</div>
+<section class="analysis-panel"><h2>分市场</h2><table><thead><tr><th>市场</th><th>样本</th><th>命中率</th><th>平均超额收益</th><th>Rank IC</th><th>IC周期</th><th>A股涨停触及</th></tr></thead><tbody>
+{% for name, item in metrics.by_market.items() %}<tr><td>{{ name }}</td><td>{{ item.sample_size }}</td><td>{{ "%.1f"|format(item.hit_rate * 100) ~ "%" if item.hit_rate is not none else "—" }}</td><td>{{ "%.2f"|format(item.average_excess_return_pct) ~ "%" if item.average_excess_return_pct is not none else "—" }}</td><td>{{ "%.3f"|format(item.rank_ic_mean) if item.rank_ic_mean is not none else "—" }}</td><td>{{ item.rank_ic_periods }}</td><td>{{ "%.1f"|format(item.limit_up_hit_rate * 100) ~ "%" if item.limit_up_hit_rate is not none else "—" }}</td></tr>{% endfor %}
 </tbody></table></section>
 {% endblock %}

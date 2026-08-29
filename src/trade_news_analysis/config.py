@@ -85,6 +85,18 @@ class Settings(BaseSettings):
     tushare_token: SecretStr | None = None
     tushare_news_enabled: bool = False
     akshare_enabled: bool = True
+    finnhub_api_key: SecretStr | None = None
+    finnhub_news_enabled: bool = False
+    sec_edgar_enabled: bool = True
+    gdelt_news_enabled: bool = True
+    gdelt_base_url: str = "https://api.gdeltproject.org/api/v2/doc/doc"
+    news_lookback_hours: int = Field(default=48, ge=1, le=168)
+    semantic_clustering_enabled: bool = False
+    semantic_clustering_model: str = Field(
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        min_length=1,
+    )
+    semantic_clustering_threshold: float = Field(default=0.82, ge=0, le=1)
     scheduler_enabled: bool = True
     ingest_interval_minutes: int = Field(default=30, ge=5, le=1440)
     request_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
@@ -133,6 +145,21 @@ class Settings(BaseSettings):
             raise ValueError("PUBLIC_BASE_URL 必须是完整的 HTTP(S) 地址")
         return normalized
 
+    @field_validator("gdelt_base_url")
+    @classmethod
+    def validate_gdelt_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname != "api.gdeltproject.org"
+            or parsed.path != "/api/v2/doc/doc"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("GDELT_BASE_URL 必须是 GDELT DOC 官方 HTTP(S) 地址")
+        return normalized
+
     @model_validator(mode="after")
     def validate_telegram_configuration(self) -> Self:
         if not self.telegram_enabled:
@@ -149,6 +176,13 @@ class Settings(BaseSettings):
     @property
     def tushare_configured(self) -> bool:
         return bool(self.tushare_token and self.tushare_token.get_secret_value().strip())
+
+    @property
+    def finnhub_configured(self) -> bool:
+        return bool(
+            self.finnhub_api_key
+            and self.finnhub_api_key.get_secret_value().strip()
+        )
 
     @property
     def llm_configured(self) -> bool:

@@ -24,6 +24,9 @@
 - TUSHARE_NEWS_ENABLED=true 仅应在账户具备新闻权限时启用。
 - 安装 data 扩展后，可在无 Token 时用 AKShare 补充 A 股证券列表和宽口径财经新闻。
 - 港美股免费降级使用 InvestorMate/yfinance；SEC、Federal Reserve RSS 始终作为独立事件源。
+- 配置 Finnhub Key 后可按美股自选股补充公司新闻；Key 只通过请求头发送。
+- SEC EDGAR 默认追踪美股自选股的 8-K、6-K、10-Q 和 10-K，不抓取申报全文。
+- GDELT 默认用单次批量请求按自选股公司名查询全球新闻，作为宏观和供应链补充。
 - /api/v1/health 显示各能力和市场覆盖。覆盖不足时，“没有采到新闻”不能解释成“没有影响”。
 
 ## 快速开始
@@ -62,9 +65,46 @@ LLM_MODEL=gpt-4o-mini
 TUSHARE_TOKEN=
 TUSHARE_NEWS_ENABLED=false
 AKSHARE_ENABLED=true
+FINNHUB_API_KEY=
+FINNHUB_NEWS_ENABLED=false
+SEC_EDGAR_ENABLED=true
+GDELT_NEWS_ENABLED=true
+GDELT_BASE_URL=https://api.gdeltproject.org/api/v2/doc/doc
+NEWS_LOOKBACK_HOURS=48
 ~~~
 
 LLM_BASE_URL 可以替换为兼容 OpenAI Chat Completions 的服务。修改 .env 后需重启应用。
+
+### 可选语义事件聚类
+
+默认事件聚类使用标题词元 Jaccard 相似度。需要处理中英文改写标题时，可安装
+Sentence Transformers 扩展：
+
+~~~bash
+uv sync --extra semantic
+~~~
+
+然后启用本地 CPU 模型：
+
+~~~dotenv
+SEMANTIC_CLUSTERING_ENABLED=true
+SEMANTIC_CLUSTERING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+SEMANTIC_CLUSTERING_THRESHOLD=0.82
+~~~
+
+模型在第一次需要语义比较时懒加载，并可能从 Hugging Face 下载模型文件，因而会增加
+首次运行时间、磁盘和内存占用。依赖缺失、下载失败或推理异常时，采集会继续运行并自动
+退回词法聚类；状态可在 `/api/v1/health` 查看。该能力只影响之后采集的新闻，不重写历史事件。
+
+Finnhub 需先申请免费 API Key，再设置 `FINNHUB_NEWS_ENABLED=true`。SEC EDGAR 和
+GDELT 不需要 Key。`HTTP_USER_AGENT` 建议包含可联系邮箱，以符合 SEC 公平访问要求。
+如当前代理网络在 GDELT TLS 握手阶段超时，可显式改用官方无密钥 HTTP 入口：
+
+~~~dotenv
+GDELT_BASE_URL=http://api.gdeltproject.org/api/v2/doc/doc
+~~~
+
+该降级仅适用于不携带凭证的公开新闻查询；网络恢复后应切回 HTTPS。
 
 ## Telegram 机会日报
 
@@ -119,6 +159,32 @@ uv run trade-news telegram-digest
 
 Token 只应保存在本地环境变量中。程序不会将 Token 写入数据库或日志。
 
+### 从公网打开本地详情页
+
+本机已安装并认证 ngrok 时，可以将 `127.0.0.1:8000` 转换为手机可访问的
+HTTPS 地址。项目提供的启动脚本会在入口启用 Basic Auth，避免将写入类 API
+直接暴露到公网；密码只进入权限受限的临时文件，ngrok 停止后会自动删除。
+
+在另一个 zsh 终端中设置访问凭据并启动隧道：
+
+~~~bash
+export TRADE_NEWS_TUNNEL_USER=trade-news
+read -s "TRADE_NEWS_TUNNEL_PASSWORD?Tunnel password (at least 8 characters): "
+export TRADE_NEWS_TUNNEL_PASSWORD
+echo
+./scripts/start-ngrok.sh
+~~~
+
+复制 ngrok 输出中 `Forwarding` 后的 `https://...ngrok.app` 地址，写入 `.env`：
+
+~~~dotenv
+PUBLIC_BASE_URL=https://your-domain.ngrok.app
+~~~
+
+重启 `uv run trade-news serve` 后，Telegram 日报中的详情链接会使用该公网地址。
+手机首次打开时需要输入上面设置的用户名和密码。隧道进程必须保持运行；按
+`Ctrl-C` 即可停止公网访问。
+
 ## 常用 API
 
 ~~~bash
@@ -146,7 +212,9 @@ curl 'http://127.0.0.1:8000/api/v1/metrics?market=US&horizon=5&top_k=10'
 
 股票综合信号按事件方向、弹性分、模型置信度和时间衰减聚合。1、5、20 日信号分别以相同交易日数作为半衰期；正反事件同时存在时冲突度上升。
 
-前向验证从信号生成后所在交易所的首次可交易开盘开始。逻辑基准为：
+前向验证从信号生成后所在交易所的首次可交易开盘开始。除方向命中率和平均超额收益外，
+看板按市场、周期和信号生成时间计算完整证券横截面的 Spearman Rank IC，并汇总未年化
+Rank ICIR；少于三个有效证券的横截面不参与计算。逻辑基准为：
 
 - A 股：CN_CSI300
 - 港股：HK_HSI
@@ -178,4 +246,5 @@ uv run pytest -m network
 
 ## 许可证
 
-项目使用 MIT 许可证，并固定依赖 InvestorMate 0.6.0（MIT）。
+项目使用 MIT 许可证，并固定依赖 InvestorMate 0.6.0（MIT）。可选语义扩展和分析方法
+来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

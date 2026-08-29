@@ -23,6 +23,7 @@ from ..models import (
 )
 from .normalization import NormalizedArticle, ensure_aware, title_similarity
 from .providers import SecurityMasterProvider, SecurityRecord, build_security_master_provider
+from .semantic import SemanticTitleMatcher, SentenceTransformerTitleMatcher
 from .sources import NewsSource, build_default_sources
 
 SourceFactory = Callable[[list[Security], Settings], list[NewsSource]]
@@ -36,11 +37,13 @@ class IngestionService:
         settings: Settings,
         source_factory: SourceFactory = build_default_sources,
         master_factory: MasterFactory = build_security_master_provider,
+        semantic_matcher: SemanticTitleMatcher | None = None,
     ):
         self.session_factory = session_factory
         self.settings = settings
         self.source_factory = source_factory
         self.master_factory = master_factory
+        self.semantic_matcher = semantic_matcher or SentenceTransformerTitleMatcher(settings)
 
     def create_run(self, trigger: str) -> int:
         with self.session_factory() as session:
@@ -57,9 +60,36 @@ class IngestionService:
                 Article.published_at <= ensure_aware(published) + timedelta(hours=72),
             )
         ).all()
-        for candidate in nearby:
-            if title_similarity(candidate.title, item.title) >= 0.72:
-                return candidate.story_cluster_id
+        lexical_scores = [title_similarity(candidate.title, item.title) for candidate in nearby]
+        semantic_scores = self.semantic_matcher.similarities(
+            item.title, [candidate.title for candidate in nearby]
+        )
+        if semantic_scores is None or len(semantic_scores) != len(nearby):
+            semantic_scores = [0.0] * len(nearby)
+        matches: list[tuple[float, float, int, Article]] = []
+        for candidate, lexical_score, semantic_score in zip(
+            nearby, lexical_scores, semantic_scores, strict=True
+        ):
+            if (
+                lexical_score < 0.72
+                and semantic_score < self.settings.semantic_clustering_threshold
+            ):
+                continue
+            published_score = (
+                ensure_aware(candidate.published_at).timestamp()
+                if candidate.published_at is not None
+                else float("-inf")
+            )
+            matches.append(
+                (
+                    max(lexical_score, semantic_score),
+                    published_score,
+                    candidate.id,
+                    candidate,
+                )
+            )
+        if matches:
+            return max(matches, key=lambda match: match[:3])[3].story_cluster_id
         return hashlib.sha256(item.title.casefold().encode("utf-8")).hexdigest()[:32]
 
     @staticmethod

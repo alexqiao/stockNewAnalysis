@@ -446,9 +446,19 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
             "/opportunities/industry",
             params={"name": "不存在的行业", "horizon": 5},
         ).status_code == 404
-        assert client.get("/api/v1/metrics").status_code == 200
-        assert "前向验证" in client.get("/metrics").text
-        assert client.get("/api/v1/health").json()["status"] == "ok"
+        metrics_response = client.get("/api/v1/metrics")
+        assert metrics_response.status_code == 200
+        metrics_payload = metrics_response.json()
+        assert "rank_correlation" in metrics_payload
+        assert metrics_payload["rank_ic_periods"] == 0
+        assert "rank_ic_mean" in metrics_payload["by_market"]["US"]
+        metrics_page = client.get("/metrics").text
+        assert "前向验证" in metrics_page
+        assert "Rank ICIR" in metrics_page
+        health_payload = client.get("/api/v1/health").json()
+        assert health_payload["status"] == "ok"
+        assert health_payload["semantic_clustering"]["enabled"] is False
+        assert health_payload["semantic_clustering"]["lexical_fallback"] is True
 
 
 def test_watchlist_accepts_ids_and_manual_cross_market_input(

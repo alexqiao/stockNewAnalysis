@@ -87,6 +87,11 @@ def parse_datetime(value: Any) -> datetime | None:
     try:
         return ensure_aware(datetime.fromisoformat(text.replace("Z", "+00:00")))
     except ValueError:
+        for date_format in ("%Y%m%dT%H%M%SZ", "%Y%m%d%H%M%S"):
+            try:
+                return datetime.strptime(text, date_format).replace(tzinfo=UTC)
+            except ValueError:
+                continue
         try:
             return ensure_aware(parsedate_to_datetime(text))
         except (TypeError, ValueError, OverflowError):
