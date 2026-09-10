@@ -42,6 +42,10 @@ class Article(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     story_cluster_id: Mapped[str] = mapped_column(String(64), index=True)
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content_kind: Mapped[str] = mapped_column(String(20), default="news", index=True)
+    evidence_role: Mapped[str] = mapped_column(String(30), default="reporting", index=True)
+    author_handle: Mapped[str | None] = mapped_column(String(64), index=True)
+    analysis_eligible: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     event_links: Mapped[list[EventArticle]] = relationship(
         back_populates="article", cascade="all, delete-orphan"
@@ -98,6 +102,10 @@ class Event(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     event_type: Mapped[str] = mapped_column(String(80), default="")
     observed_demand: Mapped[str] = mapped_column(Text, default="")
+    demand_status: Mapped[str] = mapped_column(String(20), default="unknown", index=True)
+    evidence_grade: Mapped[str] = mapped_column(String(20), default="none", index=True)
+    evidence_score: Mapped[float] = mapped_column(Float, default=0)
+    missing_proof: Mapped[list[str]] = mapped_column(JSON, default=list)
     unresolved_candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -344,3 +352,57 @@ class SourceHealth(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     items_last_run: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class XAccount(Base):
+    """A curated public X account monitored by the local browser collector."""
+
+    __tablename__ = "x_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    handle: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(160), default="")
+    account_type: Mapped[str] = mapped_column(String(20), default="commentator", index=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    posts: Mapped[list[XPost]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
+
+
+class XPost(Base):
+    """Raw social content. Only explicitly promoted posts become Article evidence."""
+
+    __tablename__ = "x_posts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("x_accounts.id", ondelete="CASCADE"), index=True
+    )
+    post_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    url: Mapped[str] = mapped_column(Text)
+    post_type: Mapped[str] = mapped_column(String(20), index=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+    quoted_post_id: Mapped[str | None] = mapped_column(String(32))
+    quoted_author_handle: Mapped[str | None] = mapped_column(String(64))
+    quoted_text: Mapped[str] = mapped_column(Text, default="")
+    external_links: Mapped[list[str]] = mapped_column(JSON, default=list)
+    media: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    public_metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    screening_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    screening: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    promoted_article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), unique=True, index=True
+    )
+    related_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("events.id", ondelete="SET NULL"), index=True
+    )
+    raw_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    account: Mapped[XAccount] = relationship(back_populates="posts")

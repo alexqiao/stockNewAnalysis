@@ -12,10 +12,11 @@ from .config import (
     DEFAULT_COMPANIES,
     DEFAULT_INDUSTRIES,
     DEFAULT_SECURITY_META,
+    DEFAULT_X_ACCOUNTS,
     OPPORTUNITY_ASSETS,
     Settings,
 )
-from .models import Base, Security, Watchlist
+from .models import Base, Security, Watchlist, XAccount
 
 SessionFactory = sessionmaker[Session]
 
@@ -36,6 +37,7 @@ def build_session_factory(engine: Engine) -> SessionFactory:
 
 def initialize_database(engine: Engine, settings: Settings) -> None:
     should_seed_watchlist = not inspect(engine).has_table(Watchlist.__tablename__)
+    should_seed_x_accounts = not inspect(engine).has_table(XAccount.__tablename__)
     Base.metadata.create_all(engine)
     factory = build_session_factory(engine)
     with factory() as session:
@@ -95,6 +97,16 @@ def initialize_database(engine: Engine, settings: Settings) -> None:
                 "opportunity_group": asset.group,
                 "opportunity_scope": asset.scope,
             }
+        if should_seed_x_accounts:
+            for position, handle in enumerate(DEFAULT_X_ACCOUNTS):
+                session.add(
+                    XAccount(
+                        handle=handle,
+                        display_name=handle,
+                        account_type="commentator",
+                        priority=position,
+                    )
+                )
         session.commit()
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 
 import uvicorn
 
@@ -12,6 +11,7 @@ from .config import get_settings
 from .db import build_engine, build_session_factory, initialize_database
 from .services.coordinator import PipelineCoordinator
 from .services.telegram import TelegramDigestService, telegram_client_from_settings
+from .services.x_posts import PlaywrightXFetcher
 
 
 def main() -> None:
@@ -21,6 +21,8 @@ def main() -> None:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     subparsers.add_parser("ingest", help="同步执行一次采集、分析和验证")
+    subparsers.add_parser("x-login", help="登录专用 X 浏览器配置")
+    subparsers.add_parser("x-ingest", help="同步执行一次 X 博主帖子采集和筛选")
     subparsers.add_parser("telegram-chats", help="列出最近与 Bot 交互的 Telegram 会话")
     telegram_digest = subparsers.add_parser(
         "telegram-digest", help="生成并发送跨市场机会日报"
@@ -35,6 +37,11 @@ def main() -> None:
         return
 
     settings = get_settings()
+    if args.command == "x-login":
+        settings.x_browser_profile_path.mkdir(parents=True, exist_ok=True)
+        PlaywrightXFetcher(settings).login()
+        print("X 浏览器会话已保存。")
+        return
     if args.command == "telegram-chats":
         try:
             chats = telegram_client_from_settings(settings).list_chats()
@@ -70,9 +77,20 @@ def main() -> None:
         return
 
     coordinator = PipelineCoordinator(factory, settings)
+    if args.command == "x-ingest":
+        future = coordinator.submit_x_ingestion()
+        future.result()
+        coordinator.shutdown()
+        engine.dispose()
+        print("X ingestion completed")
+        return
     run_id = coordinator.submit_pipeline("cli")
-    while coordinator.busy:
-        time.sleep(0.1)
-    coordinator.shutdown()
-    engine.dispose()
+    try:
+        coordinator.wait_for_pipeline()
+    except Exception as exc:
+        print(f"ingestion run {run_id} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    finally:
+        coordinator.shutdown()
+        engine.dispose()
     print(f"ingestion run {run_id} completed")

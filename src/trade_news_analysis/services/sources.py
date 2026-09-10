@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,7 @@ class NewsSource(Protocol):
 
 
 JsonFetcher = Callable[[str, float, dict[str, str]], Any]
+TextFetcher = Callable[[str, float, dict[str, str]], str]
 
 
 def fetch_json(url: str, timeout: float, headers: dict[str, str]) -> Any:
@@ -57,6 +59,12 @@ def fetch_json(url: str, timeout: float, headers: dict[str, str]) -> Any:
             raise RuntimeError(
                 f"JSON provider returned invalid {content_type} content"
             ) from exc
+
+
+def fetch_text(url: str, timeout: float, headers: dict[str, str]) -> str:
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed provider hosts
+        return response.read().decode("utf-8", errors="replace")
 
 
 class YFinanceTickerSource:
@@ -112,6 +120,149 @@ class RssNewsSource:
             if (item := normalize_feed_entry(dict(entry), self.name)) is not None
         ]
         return SourceResult(source=self.name, articles=articles)
+
+
+class BlsEmploymentSituationSource:
+    """Build the latest jobs-report event from the official BLS public data API."""
+
+    markets: tuple[str, ...] = ("A", "HK", "US")
+    coverage = "broad"
+    name = "BLS Employment Situation"
+    base_url = "https://api.bls.gov/publicAPI/v2/timeseries/data"
+    payroll_series = "CES0000000001"
+    unemployment_series = "LNS14000000"
+
+    def __init__(
+        self,
+        settings: Settings,
+        fetcher: JsonFetcher = fetch_json,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ):
+        self.settings = settings
+        self.fetcher = fetcher
+        self.now = now
+
+    def _fetch_series(
+        self, series_id: str, start_year: int, end_year: int
+    ) -> list[dict[str, Any]]:
+        query = urlencode({"startyear": start_year, "endyear": end_year})
+        payload = self.fetcher(
+            f"{self.base_url}/{series_id}?{query}",
+            self.settings.request_timeout_seconds,
+            {"User-Agent": self.settings.http_user_agent},
+        )
+        try:
+            series = payload["Results"]["series"]
+            rows = series[0]["data"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("BLS Public Data API 返回了无效数据") from exc
+        if payload.get("status") != "REQUEST_SUCCEEDED" or not isinstance(rows, list):
+            raise RuntimeError("BLS Public Data API 查询失败")
+        return [row for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _period_key(row: dict[str, Any]) -> tuple[int, int] | None:
+        period = str(row.get("period") or "")
+        if not re.fullmatch(r"M(?:0[1-9]|1[0-2])", period):
+            return None
+        try:
+            return int(row["year"]), int(period[1:])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def fetch(self) -> SourceResult:
+        current = self.now()
+        payroll_rows = self._fetch_series(
+            self.payroll_series, current.year - 1, current.year
+        )
+        unemployment_rows = self._fetch_series(
+            self.unemployment_series, current.year - 1, current.year
+        )
+        payroll_by_period = {
+            key: row
+            for row in payroll_rows
+            if (key := self._period_key(row)) is not None
+        }
+        latest_candidates = [
+            (key, row)
+            for key, row in payroll_by_period.items()
+            if str(row.get("latest") or "").casefold() == "true"
+        ]
+        if not latest_candidates:
+            return SourceResult(source=self.name)
+        latest_period, latest = max(latest_candidates)
+        ordered_periods = sorted(payroll_by_period)
+        latest_index = ordered_periods.index(latest_period)
+        if latest_index == 0:
+            return SourceResult(source=self.name)
+        previous = payroll_by_period[ordered_periods[latest_index - 1]]
+
+        expected_period = (current.year, current.month - 1)
+        if current.month == 1:
+            expected_period = (current.year - 1, 12)
+        if latest_period != expected_period or current.day > 14:
+            return SourceResult(source=self.name)
+
+        unemployment_by_period = {
+            key: row
+            for row in unemployment_rows
+            if (key := self._period_key(row)) is not None
+        }
+        unemployment = unemployment_by_period.get(latest_period)
+        try:
+            payroll_level = float(latest["value"])
+            previous_level = float(previous["value"])
+            unemployment_rate = (
+                float(unemployment["value"]) if unemployment is not None else None
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("BLS Public Data API 数值无效") from exc
+
+        change_thousands = payroll_level - previous_level
+        change_ten_thousands = change_thousands / 10
+        year, month = latest_period
+        direction = "增加" if change_thousands >= 0 else "减少"
+        unemployment_text = (
+            f"，失业率 {unemployment_rate:.1f}%"
+            if unemployment_rate is not None
+            else ""
+        )
+        title = (
+            f"美国 {year} 年 {month} 月非农就业{direction}"
+            f" {abs(change_ten_thousands):.1f} 万{unemployment_text}"
+        )
+        summary = (
+            f"美国劳工统计局数据显示，{year} 年 {month} 月非农就业总人数为"
+            f" {payroll_level / 10:.1f} 万，较上月{direction}"
+            f" {abs(change_ten_thousands):.1f} 万{unemployment_text}。"
+            "该数据是已发布的宏观实测值；缺少市场一致预期时，不应仅凭实际值判断个股方向。"
+        )
+        fingerprint_values = (
+            f"{year}-M{month:02d}:{payroll_level}:{previous_level}:{unemployment_rate}"
+        )
+        return SourceResult(
+            source=self.name,
+            articles=[
+                NormalizedArticle(
+                    source=self.name,
+                    title=title,
+                    summary=summary,
+                    url="https://www.bls.gov/news.release/empsit.nr0.htm",
+                    published_at=current,
+                    raw_data={
+                        "provider": "U.S. Bureau of Labor Statistics",
+                        "reference_year": year,
+                        "reference_month": month,
+                        "payroll_series": self.payroll_series,
+                        "payroll_level_thousands": payroll_level,
+                        "payroll_change_thousands": change_thousands,
+                        "unemployment_series": self.unemployment_series,
+                        "unemployment_rate": unemployment_rate,
+                    },
+                    fingerprint_hint=f"bls-employment:{fingerprint_values}",
+                )
+            ],
+        )
 
 
 class FinnhubCompanyNewsSource:
@@ -227,12 +378,14 @@ class SecEdgarFilingsSource:
         settings: Settings,
         directory: SecTickerDirectory,
         fetcher: JsonFetcher = fetch_json,
+        document_fetcher: TextFetcher = fetch_text,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ):
         self.security = security
         self.settings = settings
         self.directory = directory
         self.fetcher = fetcher
+        self.document_fetcher = document_fetcher
         self.now = now
         self.name = f"SEC EDGAR:{security.symbol}"
 
@@ -279,15 +432,31 @@ class SecEdgarFilingsSource:
                 document = f"{accession}-index.html"
             url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{archive_dir}/{document}"
             description = self.descriptions[form]
+            summary = f"{self.security.symbol} submitted a {description} ({form})."
+            document_loaded = False
+            try:
+                filing_text = clean_text(
+                    self.document_fetcher(
+                        url,
+                        self.settings.request_timeout_seconds,
+                        {"User-Agent": self.settings.http_user_agent},
+                    ),
+                    limit=6000,
+                )
+                if filing_text:
+                    summary = filing_text
+                    document_loaded = True
+            except Exception:
+                pass
             articles.append(
                 NormalizedArticle(
                     source="SEC EDGAR",
                     title=f"{self.security.name} filed {form} with the SEC",
-                    summary=f"{self.security.symbol} submitted a {description} ({form}).",
+                    summary=summary,
                     url=normalize_url(url),
                     published_at=published,
                     hinted_symbols={self.security.symbol},
-                    raw_data=json_safe(row),
+                    raw_data={**json_safe(row), "document_loaded": document_loaded},
                 )
             )
         return SourceResult(source=self.name, articles=articles)
@@ -473,6 +642,7 @@ def build_default_sources(
         sources.append(AkShareBroadNewsSource())
     sources.extend(
         [
+            BlsEmploymentSituationSource(settings),
             RssNewsSource(
                 "SEC Press Releases",
                 "https://www.sec.gov/news/pressreleases.rss",

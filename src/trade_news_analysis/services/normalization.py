@@ -47,9 +47,12 @@ class NormalizedArticle:
     published_at: datetime | None
     hinted_symbols: set[str] = field(default_factory=set)
     raw_data: dict[str, Any] = field(default_factory=dict)
+    fingerprint_hint: str = ""
 
     @property
     def fingerprint(self) -> str:
+        if self.fingerprint_hint:
+            return hashlib.sha256(f"hint:{self.fingerprint_hint}".encode()).hexdigest()
         return article_fingerprint(self.source, self.title, self.published_at, self.url)
 
 

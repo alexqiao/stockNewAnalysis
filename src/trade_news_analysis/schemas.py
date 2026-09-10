@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Direction = Literal["bullish", "neutral", "bearish"]
 Market = Literal["A", "HK", "US"]
+XAccountType = Literal["commentator", "company", "regulator", "media"]
+XPostDecisionValue = Literal["promote", "context", "ignore"]
 
 
 class HorizonImpact(BaseModel):
@@ -30,9 +32,11 @@ class EventPayload(BaseModel):
     canonical_title: str = Field(min_length=1, max_length=500)
     event_type: str = Field(min_length=1, max_length=80)
     observed_demand: str = Field(min_length=1, max_length=2000)
+    demand_status: Literal["observed", "inferred", "narrative_only"] = "inferred"
     themes: list[str] = Field(min_length=1, max_length=8)
     candidates: list[CandidateCompany] = Field(max_length=30)
     evidence: list[str] = Field(max_length=12)
+    missing_proof: list[str] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def candidate_themes_must_belong_to_event(self) -> Self:
@@ -44,6 +48,50 @@ class EventPayload(BaseModel):
                     f"候选 {candidate.name} 引用了事件外主题：{sorted(unknown)}"
                 )
         return self
+
+
+class XPostScreeningPayload(BaseModel):
+    classification: Literal[
+        "fact", "opinion", "prediction", "rumor", "promotion", "irrelevant"
+    ]
+    claim_summary: str = Field(min_length=1, max_length=500)
+    themes: list[str] = Field(default_factory=list, max_length=8)
+    entities: list[str] = Field(default_factory=list, max_length=20)
+    stance: Literal["bullish", "bearish", "neutral", "mixed"]
+    horizon: Literal["intraday", "1d", "1w", "1m", "long_term", "unspecified"]
+    market_relevance: int = Field(ge=0, le=5)
+    specificity: int = Field(ge=0, le=5)
+    incrementality: int = Field(ge=0, le=5)
+    factual_claims: list[str] = Field(default_factory=list, max_length=8)
+    verification_needs: list[str] = Field(default_factory=list, max_length=8)
+    rationale: str = Field(min_length=1, max_length=1000)
+
+
+class XAccountInput(BaseModel):
+    handle: str = Field(pattern=r"^@?[A-Za-z0-9_]{1,15}$")
+    display_name: str = Field(default="", max_length=160)
+    account_type: XAccountType = "commentator"
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    priority: int = Field(default=0, ge=0, le=10_000)
+    active: bool = True
+
+    @field_validator("handle")
+    @classmethod
+    def normalize_handle(cls, value: str) -> str:
+        return value.strip().removeprefix("@")
+
+
+class XAccountUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=160)
+    account_type: XAccountType | None = None
+    tags: list[str] | None = Field(default=None, max_length=20)
+    priority: int | None = Field(default=None, ge=0, le=10_000)
+    active: bool | None = None
+
+
+class XPostDecision(BaseModel):
+    decision: XPostDecisionValue
+    event_id: int | None = Field(default=None, gt=0)
 
 
 class ImpactPayload(BaseModel):

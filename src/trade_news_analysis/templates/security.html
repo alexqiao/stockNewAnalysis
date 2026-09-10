@@ -5,12 +5,13 @@
   <p class="eyebrow">{{ security.market }} · {{ security.exchange }} · {{ security.symbol }}</p>
   <h1>{{ security.name }}</h1>
   <p class="lead">{{ security.business_summary or "暂无可靠业务简介；相关弹性评分会因此更保守。" }}</p>
+  <p class="muted">资料完整度 {{ "%.0f"|format(security.data_quality * 100) }}%{% if security.data_gaps %} · 待补：{{ security.data_gaps|join("、") }}{% endif %}</p>
 </section>
 <div class="horizon-grid">
 {% for horizon in [1, 5, 20] %}{% set signal = security.signals[horizon|string] %}
   <div class="horizon {{ signal.direction if signal else 'neutral' }}">
     <strong>{{ horizon }} 个交易日</strong>
-    {% if signal %}<span>{{ signal.direction }} · {{ "%.1f"|format(signal.score) }} 分</span><p>置信度 {{ "%.0f"|format(signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(signal.conflict * 100) }}%</p>{% else %}<span>尚无信号</span>{% endif %}
+    {% if signal %}<span>{{ signal.direction }} · 决策分 {{ "%.1f"|format(signal.decision_score) }}</span><p>研究分 {{ "%.1f"|format(signal.research_score) }} · 置信度 {{ "%.0f"|format(signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(signal.conflict * 100) }}%</p>{% else %}<span>尚无信号</span>{% endif %}
   </div>
 {% endfor %}
 </div>

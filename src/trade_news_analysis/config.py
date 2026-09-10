@@ -13,6 +13,15 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_WATCHLIST = "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
+DEFAULT_X_ACCOUNTS = (
+    "joely7758521",
+    "JasonZX",
+    "jimmyhuli",
+    "Money_or_Life_X",
+    "darrencao2024",
+    "xiaomustock",
+    "tychozzz",
+)
 DEFAULT_COMPANIES: dict[str, tuple[str, list[str]]] = {
     "AAPL": ("Apple Inc.", ["Apple"]),
     "MSFT": ("Microsoft Corporation", ["Microsoft"]),
@@ -99,6 +108,10 @@ class Settings(BaseSettings):
     semantic_clustering_threshold: float = Field(default=0.82, ge=0, le=1)
     scheduler_enabled: bool = True
     ingest_interval_minutes: int = Field(default=30, ge=5, le=1440)
+    x_browser_enabled: bool = False
+    x_fetch_interval_hours: int = Field(default=6, ge=1, le=24)
+    x_lookback_hours: int = Field(default=24, ge=6, le=168)
+    x_browser_profile_path: Path = Path("./data/x-browser-profile")
     request_timeout_seconds: float = Field(default=20.0, ge=1, le=120)
     auto_analyze: bool = True
     app_timezone: str = "America/New_York"
@@ -212,6 +225,8 @@ class Settings(BaseSettings):
         if self.database_url.startswith(prefix):
             database_path = Path(self.database_url.removeprefix(prefix))
             database_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.x_browser_enabled:
+            self.x_browser_profile_path.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

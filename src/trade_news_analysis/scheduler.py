@@ -30,6 +30,12 @@ def start_scheduler(settings: Settings, coordinator: PipelineCoordinator) -> Bac
     def scheduled_telegram_commands() -> None:
         coordinator.poll_telegram_commands()
 
+    def scheduled_x_ingestion() -> None:
+        try:
+            coordinator.submit_x_ingestion()
+        except PipelineBusyError:
+            logger.info("Skipping scheduled X ingestion because the pipeline is active")
+
     scheduler.add_job(
         scheduled_pipeline,
         "interval",
@@ -38,6 +44,15 @@ def start_scheduler(settings: Settings, coordinator: PipelineCoordinator) -> Bac
         max_instances=1,
         coalesce=True,
     )
+    if settings.x_browser_enabled:
+        scheduler.add_job(
+            scheduled_x_ingestion,
+            "interval",
+            hours=settings.x_fetch_interval_hours,
+            id="x-post-ingestion",
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(
         scheduled_evaluation,
         "cron",

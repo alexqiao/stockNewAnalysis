@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from math import sqrt
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +15,36 @@ from ..models import Security, SecuritySignalSnapshot, SignalOutcome
 from .normalization import ensure_aware
 
 MetricRow = tuple[SignalOutcome, SecuritySignalSnapshot, Security]
+
+
+def _entry_key(row: MetricRow) -> tuple[int, int, datetime]:
+    outcome, snapshot, security = row
+    timezone = security.timezone or {
+        "A": "Asia/Shanghai",
+        "HK": "Asia/Hong_Kong",
+        "US": "America/New_York",
+    }.get(security.market, "UTC")
+    baseline = ensure_aware(outcome.baseline_at or snapshot.as_of).astimezone(
+        ZoneInfo(timezone)
+    )
+    return security.id, snapshot.horizon, baseline.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def _period_key(row: MetricRow) -> tuple[str, int, datetime]:
+    return row[2].market, row[1].horizon, _entry_key(row)[2]
+
+
+def _deduplicate_decisions(rows: list[MetricRow]) -> list[MetricRow]:
+    """Keep the last signal state targeting each security's actual entry session."""
+    latest: dict[tuple[int, int, datetime], MetricRow] = {}
+    for row in rows:
+        key = _entry_key(row)
+        current = latest.get(key)
+        if current is None or ensure_aware(row[1].as_of) > ensure_aware(current[1].as_of):
+            latest[key] = row
+    return list(latest.values())
 
 
 def _correlation(pairs: list[tuple[float, float]]) -> float | None:
@@ -48,9 +79,7 @@ def _rank_ic_summary(rows: list[MetricRow]) -> dict[str, Any]:
     cross_sections: dict[tuple[str, int, datetime], list[MetricRow]] = defaultdict(list)
     for row in rows:
         outcome, snapshot, security = row
-        cross_sections[(security.market, snapshot.horizon, ensure_aware(snapshot.as_of))].append(
-            (outcome, snapshot, security)
-        )
+        cross_sections[(security.market, snapshot.horizon, _entry_key(row)[2])].append(row)
 
     period_values: list[float] = []
     for period_rows in cross_sections.values():
@@ -106,6 +135,7 @@ def _summarize(
     correlation = _correlation(rank_pairs)
     return {
         "sample_size": n,
+        "decision_periods": len({_period_key(row) for row in rows}),
         "hit_rate": sum(int(outcome.correct) for outcome, _, _ in rows) / n if n else None,
         "average_excess_return_pct": (
             sum(outcome.excess_return_pct for outcome, _, _ in rows) / n if n else None
@@ -139,14 +169,20 @@ def build_metrics(
         query = query.where(SecuritySignalSnapshot.horizon == horizon)
     if since:
         query = query.where(SecuritySignalSnapshot.as_of >= since)
-    all_rows = cast(
+    raw_rows = cast(
         list[MetricRow],
         list(session.execute(query).tuples().all()),
     )
+    raw_rows = [
+        row
+        for row in raw_rows
+        if "decision_score" in (row[1].components or {})
+    ]
+    all_rows = _deduplicate_decisions(raw_rows)
     rows = [
         row
         for row in all_rows
-        if row[1].rank is None or row[1].rank <= top_k
+        if row[1].rank is not None and row[1].rank <= top_k
     ]
     markets = {
         name: _summarize(
@@ -158,6 +194,11 @@ def build_metrics(
     return {
         **_summarize(rows, all_rows),
         "top_k": top_k,
-        "evidence": "sufficient" if len(rows) >= 30 else "insufficient",
+        "scoring_version": "v2",
+        "evidence": (
+            "sufficient"
+            if len(rows) >= 30 and len({_period_key(row) for row in rows}) >= 20
+            else "insufficient"
+        ),
         "by_market": markets,
     }

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}博主配置 · 股票事件研究{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <p class="eyebrow">CURATED X ACCOUNTS</p>
+  <div class="panel-heading"><div><h1>博主白名单</h1><p class="lead">账号类型会影响证据处理：个人博主默认只作线索，公司、监管和媒体账号可在满足筛选条件时自动晋级。</p></div><a class="secondary button-link" href="/x">返回动态</a></div>
+</section>
+<section class="analysis-panel">
+  <table id="accounts"><thead><tr><th>账号</th><th>显示名</th><th>类型</th><th>标签</th><th>顺序</th><th>启用</th><th></th></tr></thead><tbody>
+    {% for account in accounts %}<tr data-id="{{ account.id }}"><td>@{{ account.handle }}</td><td><input data-field="display_name" value="{{ account.display_name }}"></td><td><select data-field="account_type"><option value="commentator"{% if account.account_type == "commentator" %} selected{% endif %}>个人博主</option><option value="company"{% if account.account_type == "company" %} selected{% endif %}>公司官方</option><option value="regulator"{% if account.account_type == "regulator" %} selected{% endif %}>监管机构</option><option value="media"{% if account.account_type == "media" %} selected{% endif %}>媒体</option></select></td><td><input data-field="tags" value="{{ account.tags|join(',') }}"></td><td><input data-field="priority" type="number" min="0" value="{{ account.priority }}"></td><td><input data-field="active" type="checkbox"{% if account.active %} checked{% endif %}></td><td><button class="secondary save-account">保存</button></td></tr>{% endfor %}
+  </tbody></table>
+</section>
+<section class="analysis-panel"><h2>新增账号</h2><div class="filters"><label>X Handle<input id="new-handle" placeholder="例如 XDevelopers"></label><label>显示名<input id="new-name"></label><label>类型<select id="new-type"><option value="commentator">个人博主</option><option value="company">公司官方</option><option value="regulator">监管机构</option><option value="media">媒体</option></select></label><button id="add-account" class="primary">添加</button></div><div id="message" class="notice hidden"></div></section>
+{% endblock %}
+{% block scripts %}<script>
+const message = document.getElementById('message');
+function showMessage(text) { message.textContent = text; message.classList.remove('hidden'); }
+document.querySelectorAll('.save-account').forEach(function (button) {
+  button.onclick = async function () {
+    const row = button.closest('tr');
+    const payload = {
+      display_name: row.querySelector('[data-field="display_name"]').value.trim(),
+      account_type: row.querySelector('[data-field="account_type"]').value,
+      tags: row.querySelector('[data-field="tags"]').value.split(',').map(v => v.trim()).filter(Boolean),
+      priority: Number(row.querySelector('[data-field="priority"]').value || 0),
+      active: row.querySelector('[data-field="active"]').checked
+    };
+    const response = await fetch('/api/v1/x/accounts/' + row.dataset.id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    showMessage(response.ok ? '账号已保存。' : '保存失败：' + ((await response.json()).detail || response.status));
+  };
+});
+document.getElementById('add-account').onclick = async function () {
+  const payload = {handle: document.getElementById('new-handle').value.trim(), display_name: document.getElementById('new-name').value.trim(), account_type: document.getElementById('new-type').value};
+  const response = await fetch('/api/v1/x/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+  if (response.ok) window.location.reload(); else showMessage('添加失败：' + ((await response.json()).detail || response.status));
+};
+</script>{% endblock %}

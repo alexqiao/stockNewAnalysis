@@ -33,8 +33,10 @@ class FakeProvider:
         return frame(100, 0) if self.with_benchmark else pd.DataFrame()
 
 
-def add_snapshot(session: Session, as_of: datetime) -> SecuritySignalSnapshot:
-    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+def add_snapshot(
+    session: Session, as_of: datetime, symbol: str = "AAPL"
+) -> SecuritySignalSnapshot:
+    security = session.scalar(select(Security).where(Security.symbol == symbol))
     assert security is not None
     snapshot = SecuritySignalSnapshot(
         security_id=security.id,
@@ -81,3 +83,33 @@ def test_evaluator_does_not_write_without_market_benchmark(session: Session) -> 
     evaluator = OutcomeEvaluator(provider=FakeProvider(with_benchmark=False))
     assert evaluator.evaluate(session, now=datetime(2026, 3, 1, tzinfo=UTC)) == 0
     assert session.scalar(select(func.count()).select_from(SignalOutcome)) == 0
+
+
+def test_evaluator_does_not_write_non_finite_prices(session: Session) -> None:
+    class NonFiniteProvider(FakeProvider):
+        def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
+            result = frame(100, 3)
+            result.loc[result.index[4], "Close"] = float("nan")
+            return result
+
+    add_snapshot(session, datetime(2026, 1, 4, 12, tzinfo=UTC))
+    evaluator = OutcomeEvaluator(provider=NonFiniteProvider())
+
+    assert evaluator.evaluate(session, now=datetime(2026, 3, 1, tzinfo=UTC)) == 0
+    assert session.scalar(select(func.count()).select_from(SignalOutcome)) == 0
+
+
+def test_evaluator_batches_past_an_ineligible_snapshot(session: Session) -> None:
+    class SelectiveProvider(FakeProvider):
+        def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
+            self.calls.append((market, symbol))
+            return pd.DataFrame() if symbol == "AAPL" else frame(100, 3)
+
+    add_snapshot(session, datetime(2026, 1, 4, 12, tzinfo=UTC), "AAPL")
+    add_snapshot(session, datetime(2026, 1, 4, 12, tzinfo=UTC), "MSFT")
+    evaluator = OutcomeEvaluator(provider=SelectiveProvider(), batch_size=1)
+
+    assert evaluator.evaluate(session, now=datetime(2026, 3, 1, tzinfo=UTC)) == 1
+    outcome = session.scalar(select(SignalOutcome))
+    assert outcome is not None
+    assert outcome.snapshot.security.symbol == "MSFT"

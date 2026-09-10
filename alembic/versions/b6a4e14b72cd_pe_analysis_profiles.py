@@ -20,6 +20,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if sa.inspect(bind).has_table("pe_analysis_profiles"):
+        return
     op.create_table(
         "pe_analysis_profiles",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -54,6 +57,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    if not sa.inspect(bind).has_table("pe_analysis_profiles"):
+        return
     op.drop_index(
         op.f("ix_pe_analysis_profiles_security_id"),
         table_name="pe_analysis_profiles",

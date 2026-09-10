@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}博主动态 · 股票事件研究{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <p class="eyebrow">X POST INBOX</p>
+  <div class="panel-heading"><div><h1>博主动态</h1><p class="lead">全部帖子先进入收件箱；只有可核实且有市场增量的内容才进入事件分析。</p></div><div class="actions"><a class="secondary button-link" href="/x/accounts">配置博主</a><button id="run-x" class="primary">立即抓取</button></div></div>
+</section>
+<form class="filters" method="get"><label>账号<select name="account_id"><option value="">全部</option>{% for account in accounts %}<option value="{{ account.id }}"{% if selected_account_id == account.id %} selected{% endif %}>@{{ account.handle }}</option>{% endfor %}</select></label><label>状态<select name="screening_status"><option value="">全部</option>{% for value, label in [("review", "待审核"), ("promoted", "已纳入"), ("context", "仅参考"), ("ignored", "已忽略"), ("pending", "待筛选")] %}<option value="{{ value }}"{% if selected_status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button class="secondary" type="submit">筛选</button></form>
+<div id="message" class="notice hidden"></div>
+<section class="social-feed">{% for post in posts %}<article class="news-card social-post" data-id="{{ post.id }}"><div class="meta"><span>@{{ post.account.handle }} · {{ post.account.account_type }}</span><span>{{ post.published_at }}</span></div><div class="signals"><span class="direction {{ post.screening_status }}">{{ post.screening_status }}</span><span class="tag">{{ post.screening.classification or "未分类" }}</span>{% for theme in post.screening.themes or [] %}<span class="tag">{{ theme }}</span>{% endfor %}</div><p>{{ post.text or "（无文字，仅媒体）" }}</p>{% if post.quoted_text %}<blockquote>引用 @{{ post.quoted_author_handle }}：{{ post.quoted_text }}</blockquote>{% endif %}{% if post.screening.claim_summary %}<p class="muted"><strong>筛选摘要：</strong>{{ post.screening.claim_summary }}</p>{% endif %}<div class="meta"><a class="external" href="{{ post.url }}" target="_blank" rel="noopener noreferrer">查看原帖 ↗</a><span>{{ post.media|length }} 个媒体 · {{ post.external_links|length }} 个外链</span></div><div class="actions review-actions"><button class="primary decision" data-decision="promote">纳入分析</button><button class="secondary decision" data-decision="context">仅作参考</button><button class="secondary decision" data-decision="ignore">忽略</button>{% if post.related_event_id %}<a href="/events/{{ post.related_event_id }}">关联事件 #{{ post.related_event_id }}</a>{% endif %}</div></article>{% else %}<div class="empty">尚无帖子。请先完成 <code>trade-news x-login</code>，再运行抓取。</div>{% endfor %}</section>
+{% endblock %}
+{% block scripts %}<script>
+const message = document.getElementById('message');
+function showMessage(text) { message.textContent = text; message.classList.remove('hidden'); }
+document.getElementById('run-x').onclick = async function () {
+  this.disabled = true;
+  const response = await fetch('/api/v1/runs/x-ingest', {method: 'POST'});
+  showMessage(response.ok ? 'X 抓取已排队，稍后刷新页面查看。' : '启动失败：' + ((await response.json()).detail || response.status));
+};
+document.querySelectorAll('.decision').forEach(function (button) {
+  button.onclick = async function () {
+    const card = button.closest('[data-id]');
+    const response = await fetch('/api/v1/x/posts/' + card.dataset.id + '/decision', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision: button.dataset.decision})});
+    if (response.ok) window.location.reload(); else showMessage('操作失败：' + ((await response.json()).detail || response.status));
+  };
+});
+</script>{% endblock %}

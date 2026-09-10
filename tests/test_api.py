@@ -14,7 +14,7 @@ from trade_news_analysis import api as api_module
 from trade_news_analysis.config import Settings
 from trade_news_analysis.db import SessionFactory
 from trade_news_analysis.main import create_app
-from trade_news_analysis.models import EventSecurityImpact, Security
+from trade_news_analysis.models import Article, Event, EventArticle, EventSecurityImpact, Security
 from trade_news_analysis.services import opportunities as opportunity_service
 from trade_news_analysis.services.analysis import EventAnalyzer
 from trade_news_analysis.services.coordinator import PipelineCoordinator
@@ -292,7 +292,7 @@ def test_dashboard_opportunities_keeps_selected_market() -> None:
     assert "%E6%9C%BA%E5%99%A8%E4%BA%BA" in rows[0]["detail_url"]
 
 
-def test_dashboard_opportunities_apply_us_a_quota_by_primary_market() -> None:
+def test_dashboard_opportunities_apply_cross_market_quota_by_primary_market() -> None:
     all_opportunities = opportunity_service.aggregate_trend_opportunities(
         [
             {
@@ -319,9 +319,9 @@ def test_dashboard_opportunities_apply_us_a_quota_by_primary_market() -> None:
     )
 
     assert len(rows) == 10
-    assert sum(item["primary_market"] == "US" for item in rows) == 7
-    assert sum(item["primary_market"] == "A" for item in rows) == 3
-    assert all(item["primary_market"] != "HK" for item in rows)
+    assert sum(item["primary_market"] == "US" for item in rows) == 4
+    assert sum(item["primary_market"] == "A" for item in rows) == 4
+    assert sum(item["primary_market"] == "HK" for item in rows) == 2
 
 
 def test_related_stocks_include_both_directions_and_exclude_research_assets() -> None:
@@ -418,10 +418,39 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
         assert client.get(f"/api/v1/securities/{security_id}").status_code == 200
         assert client.get("/api/v1/themes").json()[0]["event_count"] == 1
 
+        with session_factory() as session:
+            macro_article = Article(
+                fingerprint="b" * 64,
+                canonical_url="https://www.bls.gov/news.release/empsit.nr0.htm",
+                source="BLS Employment Situation",
+                title="美国 2026 年 8 月非农就业增加 16.2 万，失业率 4.1%",
+                summary="美国劳工统计局已发布就业实测值。",
+                published_at=datetime.now(UTC),
+                story_cluster_id="bls-employment-2026-08",
+            )
+            macro_event = Event(
+                event_key="bls-employment-2026-08",
+                status="pending",
+                title=macro_article.title,
+                summary=macro_article.summary,
+                occurred_at=macro_article.published_at,
+            )
+            session.add_all([macro_article, macro_event])
+            session.flush()
+            session.add(
+                EventArticle(event_id=macro_event.id, article_id=macro_article.id)
+            )
+            session.commit()
+
         dashboard = client.get("/")
         assert dashboard.status_code == 200
         assert "从事件发现趋势" in dashboard.text
         assert "Apple Inc." in dashboard.text
+        assert "新闻与估值数据不足" in dashboard.text
+        assert "宏观背景" in dashboard.text
+        assert "美国 2026 年 8 月非农就业增加 16.2 万" in dashboard.text
+        assert "暂不计入个股方向" in dashboard.text
+        assert "查看新闻证据与 PE 假设" in dashboard.text
         opportunity_section = dashboard.text.split("跨市场机会榜", 1)[1].split(
             "自选股当前研判", 1
         )[0]

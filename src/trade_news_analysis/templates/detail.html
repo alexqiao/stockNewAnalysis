@@ -2,9 +2,10 @@
 {% block title %}{{ article.title }} · 原始证据{% endblock %}
 {% block content %}
 <article class="detail">
-  <p class="eyebrow">RAW EVIDENCE · {{ article.source }} · {{ article.published_at or article.fetched_at }}</p>
+  <p class="eyebrow">{% if article.content_kind == "social_post" %}SOCIAL EVIDENCE{% else %}RAW EVIDENCE{% endif %} · {{ article.source }} · {{ article.published_at or article.fetched_at }}</p>
   <h1>{{ article.title }}</h1>
   <p class="lead">{{ article.summary or "无摘要" }}</p>
+  {% if article.content_kind == "social_post" %}<div class="notice">该内容来自社交媒体，证据角色为 {{ article.evidence_role }}；个人博主线索默认不提高事实证据质量。</div>{% endif %}
   {% if article.url %}<p><a class="external" href="{{ article.url }}" target="_blank" rel="noopener noreferrer">查看原始来源 ↗</a></p>{% endif %}
 </article>
 <section class="analysis-panel">

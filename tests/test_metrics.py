@@ -23,6 +23,7 @@ def metric_row(
         horizon=5,
         score=score,
         direction="bullish",
+        components={"research_score": score, "decision_score": score},
     )
     outcome = SignalOutcome(snapshot=snapshot, excess_return_pct=excess_return)
     return outcome, snapshot, security
@@ -95,6 +96,7 @@ def test_build_metrics_uses_full_cross_section_for_rank_ic(session: Session) -> 
             confidence=0.8,
             conflict=0,
             rank=rank,
+            components={"research_score": score, "decision_score": score},
         )
         session.add(snapshot)
         session.flush()
@@ -130,3 +132,79 @@ def test_build_metrics_uses_full_cross_section_for_rank_ic(session: Session) -> 
     single_security = build_metrics(session, security_id=securities[0].id)
     assert single_security["rank_ic_periods"] == 0
     assert single_security["rank_ic_mean"] is None
+
+
+def test_build_metrics_excludes_unranked_and_deduplicates_entry_session(
+    session: Session,
+) -> None:
+    securities = session.scalars(
+        select(Security).where(Security.market == "US").order_by(Security.id).limit(2)
+    ).all()
+    assert len(securities) == 2
+    as_of = datetime(2026, 1, 5, 12, tzinfo=UTC)
+    baseline = datetime(2026, 1, 6, 14, 30, tzinfo=UTC)
+    for offset in (0, 1):
+        snapshot = SecuritySignalSnapshot(
+            security_id=securities[0].id,
+            as_of=as_of + timedelta(hours=offset),
+            horizon=5,
+            score=20 + offset,
+            direction="bullish",
+            confidence=0.8,
+            rank=1,
+            components={"research_score": 20 + offset, "decision_score": 20 + offset},
+        )
+        session.add(snapshot)
+        session.flush()
+        session.add(
+            SignalOutcome(
+                snapshot_id=snapshot.id,
+                baseline_at=baseline,
+                observed_at=baseline + timedelta(days=7),
+                entry_price=100,
+                exit_price=102,
+                benchmark_entry=100,
+                benchmark_exit=101,
+                return_pct=2,
+                benchmark_return_pct=1,
+                excess_return_pct=1,
+                predicted_direction="bullish",
+                actual_direction="bullish",
+                correct=True,
+            )
+        )
+    unranked = SecuritySignalSnapshot(
+        security_id=securities[1].id,
+        as_of=as_of,
+        horizon=5,
+        score=-20,
+        direction="bearish",
+        confidence=0.8,
+        rank=None,
+        components={"research_score": -20, "decision_score": -20},
+    )
+    session.add(unranked)
+    session.flush()
+    session.add(
+        SignalOutcome(
+            snapshot_id=unranked.id,
+            baseline_at=baseline,
+            observed_at=baseline + timedelta(days=7),
+            entry_price=100,
+            exit_price=98,
+            benchmark_entry=100,
+            benchmark_exit=101,
+            return_pct=-2,
+            benchmark_return_pct=1,
+            excess_return_pct=-3,
+            predicted_direction="bearish",
+            actual_direction="bearish",
+            correct=True,
+        )
+    )
+    session.commit()
+
+    result = build_metrics(session, market="US", horizon=5, top_k=10)
+
+    assert result["sample_size"] == 1
+    assert result["decision_periods"] == 1

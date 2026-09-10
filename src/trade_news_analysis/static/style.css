@@ -26,6 +26,7 @@ h2 { font-size: 24px; }
 .lead { font-size: 19px; color: #374039; max-width: 850px; }
 button, select, input { font: inherit; }
 button { border-radius: 2px; padding: 10px 16px; cursor: pointer; }
+.button-link { display: inline-block; padding: 9px 15px; text-decoration: none; }
 button:disabled { cursor: wait; opacity: .55; }
 .primary { border: 1px solid var(--ink); background: var(--ink); color: white; }
 .secondary { border: 1px solid var(--line); background: var(--card); color: var(--ink); }
@@ -34,10 +35,30 @@ button:disabled { cursor: wait; opacity: .55; }
 .filters select, input { border: 1px solid var(--line); background: var(--card); padding: 8px 10px; }
 .news-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .news-card, .analysis-panel { background: var(--card); border: 1px solid var(--line); padding: 24px; }
+.social-feed { display: grid; gap: 16px; }
+.social-post { overflow-wrap: anywhere; }
+.social-post blockquote { margin: 14px 0; padding: 10px 14px; border-left: 3px solid var(--line); background: var(--paper); color: var(--muted); }
+.review-actions { margin-top: 18px; justify-content: flex-start; flex-wrap: wrap; }
 .card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.signal-card { position: relative; background: var(--card); border: 1px solid var(--line); padding: 20px; min-height: 180px; }
+.signal-card { position: relative; background: var(--card); border: 1px solid var(--line); padding: 20px; min-height: 300px; }
 .signal-card h2 { margin: 14px 0 6px; }
 .signal-card a { text-decoration: none; }
+.judgment-verdict { margin: 14px 0 10px; padding: 12px; border-left: 4px solid var(--muted); background: var(--paper); }
+.judgment-verdict span { display: block; color: var(--muted); font-size: 12px; }
+.judgment-verdict strong { display: block; margin-top: 2px; font: 600 20px/1.3 Georgia, serif; }
+.judgment-verdict.supportive { border-left-color: var(--green); }
+.judgment-verdict.supportive strong { color: var(--green); }
+.judgment-verdict.caution, .judgment-verdict.balanced { border-left-color: var(--amber); }
+.judgment-verdict.caution strong, .judgment-verdict.balanced strong { color: var(--amber); }
+.judgment-verdict.risk { border-left-color: var(--red); }
+.judgment-verdict.risk strong { color: var(--red); }
+.judgment-summary { margin: 10px 0; }
+.judgment-factors { display: flex; flex-wrap: wrap; gap: 6px; }
+.judgment-factors span { padding: 2px 7px; border: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.judgment-evidence { color: var(--muted); font-size: 12px; }
+.judgment-macro { padding: 8px; background: var(--paper); color: var(--muted); font-size: 12px; }
+.judgment-macro a { color: var(--ink); }
+.judgment-detail { color: var(--green); font-size: 12px; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin: 44px 0 14px; border-bottom: 1px solid var(--line); }
 .section-heading h2 { margin-top: 2px; }
 .muted { color: var(--muted); }

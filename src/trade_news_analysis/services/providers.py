@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import math
 import re
 from collections.abc import Mapping
@@ -15,6 +16,8 @@ import pandas as pd
 from investormate import Stock
 
 from ..config import Settings
+
+logger = logging.getLogger(__name__)
 
 BENCHMARKS = {"A": "CN_CSI300", "HK": "HK_HSI", "US": "US_SPY"}
 TUSHARE_BENCHMARKS = {
@@ -123,6 +126,7 @@ class TushareProvider:
         self.client = TushareClient(
             settings.tushare_token.get_secret_value(), settings.request_timeout_seconds
         )
+        self.market_errors: dict[str, str] = {}
 
     def fetch_securities(self) -> list[SecurityRecord]:
         result: list[SecurityRecord] = []
@@ -132,7 +136,12 @@ class TushareProvider:
             ("US", "us_basic", "ts_code,name,enname,classify,list_status"),
         )
         for market, api_name, fields in specs:
-            for row in self.client.query(api_name, {"list_status": "L"}, fields):
+            try:
+                rows = self.client.query(api_name, {"list_status": "L"}, fields)
+            except Exception as exc:
+                self.market_errors[market] = f"{type(exc).__name__}: {exc}"
+                continue
+            for row in rows:
                 symbol = str(row.get("ts_code") or row.get("symbol") or "").upper()
                 if not symbol:
                     continue
@@ -157,6 +166,11 @@ class TushareProvider:
                         provider_data=row,
                     )
                 )
+        if not result and self.market_errors:
+            details = "; ".join(
+                f"{market}: {error}" for market, error in self.market_errors.items()
+            )
+            raise RuntimeError(details)
         return result
 
     def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
@@ -247,6 +261,75 @@ class YahooMarketDataProvider:
         return self.history(market, symbol, period)
 
 
+class FallbackMarketDataProvider:
+    """Use a secondary provider when selected markets fail or return no prices."""
+
+    def __init__(
+        self,
+        primary: MarketDataProvider,
+        fallback: MarketDataProvider,
+        fallback_markets: frozenset[str],
+    ):
+        self.primary = primary
+        self.fallback = fallback
+        self.fallback_markets = fallback_markets
+        self._unavailable_primary_markets: set[str] = set()
+        self.name = f"{primary.name}+{fallback.name}"
+
+    @staticmethod
+    def _is_market_level_failure(reason: str) -> bool:
+        normalized = reason.casefold()
+        return any(
+            marker in normalized
+            for marker in ("没有接口", "无权限", "permission", "not authorized")
+        )
+
+    def history(self, market: str, symbol: str, period: str = "6mo") -> pd.DataFrame:
+        if market not in self.fallback_markets:
+            return self.primary.history(market, symbol, period)
+        if market in self._unavailable_primary_markets:
+            return self.fallback.history(market, symbol, period)
+        try:
+            result = self.primary.history(market, symbol, period)
+            if isinstance(result, pd.DataFrame) and not result.empty:
+                return result
+            reason = "empty response"
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            if self._is_market_level_failure(reason):
+                self._unavailable_primary_markets.add(market)
+        logger.warning(
+            "%s history unavailable for %s:%s; falling back to %s: %s",
+            self.primary.name,
+            market,
+            symbol,
+            self.fallback.name,
+            reason,
+        )
+        return self.fallback.history(market, symbol, period)
+
+    def benchmark_history(self, market: str, period: str = "6mo") -> pd.DataFrame:
+        if market not in self.fallback_markets:
+            return self.primary.benchmark_history(market, period)
+        if market in self._unavailable_primary_markets:
+            return self.fallback.benchmark_history(market, period)
+        try:
+            result = self.primary.benchmark_history(market, period)
+            if isinstance(result, pd.DataFrame) and not result.empty:
+                return result
+            reason = "empty response"
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "%s benchmark unavailable for %s; falling back to %s: %s",
+            self.primary.name,
+            market,
+            self.fallback.name,
+            reason,
+        )
+        return self.fallback.benchmark_history(market, period)
+
+
 class InvestorMateFundamentalProvider:
     name = "investormate/yfinance"
 
@@ -330,7 +413,14 @@ def build_security_master_provider(settings: Settings) -> SecurityMasterProvider
 
 
 def build_market_data_provider(settings: Settings) -> MarketDataProvider:
-    return TushareProvider(settings) if settings.tushare_configured else YahooMarketDataProvider()
+    yahoo = YahooMarketDataProvider()
+    if not settings.tushare_configured:
+        return yahoo
+    return FallbackMarketDataProvider(
+        TushareProvider(settings),
+        yahoo,
+        fallback_markets=frozenset({"HK", "US"}),
+    )
 
 
 def lookup_security_record(market: str, value: str) -> SecurityRecord | None:

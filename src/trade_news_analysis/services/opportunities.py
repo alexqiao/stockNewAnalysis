@@ -21,10 +21,12 @@ from ..models import (
     SecuritySignalSnapshot,
     Theme,
 )
+from .research_quality import company_data_quality
+from .scoring import summarize_components
 
 DASHBOARD_OPPORTUNITY_LIMIT = 10
 DASHBOARD_OPPORTUNITY_SOURCE_LIMIT = 200
-DASHBOARD_MARKET_LIMITS = {"US": 7, "A": 3}
+DASHBOARD_MARKET_LIMITS = {"US": 4, "A": 4, "HK": 2}
 NEGATIVE_THEME_MARKERS = (
     "无直接",
     "不相关",
@@ -37,6 +39,7 @@ NEGATIVE_THEME_MARKERS = (
 
 def security_brief(security: Security) -> dict[str, Any]:
     provider_data = security.provider_data or {}
+    data_quality, data_gaps = company_data_quality(security)
     return {
         "id": security.id,
         "market": security.market,
@@ -48,6 +51,8 @@ def security_brief(security: Security) -> dict[str, Any]:
         "currency": security.currency,
         "opportunity_group": provider_data.get("opportunity_group"),
         "opportunity_scope": provider_data.get("opportunity_scope"),
+        "data_quality": data_quality,
+        "data_gaps": data_gaps,
     }
 
 
@@ -72,11 +77,14 @@ def latest_snapshot_map(
 def signal_dict(snapshot: SecuritySignalSnapshot | None) -> dict[str, Any] | None:
     if snapshot is None:
         return None
+    components = snapshot.components or {}
     return {
         "id": snapshot.id,
         "as_of": snapshot.as_of,
         "horizon": snapshot.horizon,
         "score": snapshot.score,
+        "research_score": components.get("research_score", snapshot.score),
+        "decision_score": components.get("decision_score", snapshot.score),
         "direction": snapshot.direction,
         "confidence": snapshot.confidence,
         "conflict": snapshot.conflict,
@@ -92,6 +100,7 @@ def list_security_opportunities(
     theme: str | None,
     horizon: int,
     limit: int,
+    direction: str = "bullish",
 ) -> list[dict[str, Any]]:
     allowed_ids: set[int] | None = None
     if theme:
@@ -121,13 +130,23 @@ def list_security_opportunities(
     securities = {item.id: item for item in session.scalars(query)}
     rows: list[dict[str, Any]] = []
     for security_id, snapshot in snapshots.items():
-        if security_id not in securities or snapshot.score <= 0:
+        if security_id not in securities or snapshot.direction != direction:
             continue
         signal = signal_dict(snapshot)
         if signal is not None:
             rows.append({"security": security_brief(securities[security_id]), "signal": signal})
-    rows.sort(key=lambda item: item["signal"]["score"], reverse=True)
-    return rows[:limit]
+    rows.sort(
+        key=lambda item: (
+            abs(item["signal"]["score"]),
+            item["signal"]["confidence"],
+            item["security"]["symbol"],
+        ),
+        reverse=True,
+    )
+    visible = rows[:limit]
+    for rank, item in enumerate(visible, 1):
+        item["signal"]["rank"] = rank
+    return visible
 
 
 def _normalize_theme_text(value: str) -> str:
@@ -183,22 +202,26 @@ def _scope_signal_to_events(
     ]
     if not selected:
         return {**signal, "evidence_event_ids": []}
-    signed_total = sum(float(item.get("contribution") or 0.0) for item in selected)
-    absolute_total = sum(abs(float(item.get("contribution") or 0.0)) for item in selected)
-    normalizer = sum(
-        float(item.get("confidence") or 0.0) * float(item.get("decay") or 0.0)
-        for item in selected
+    research_score, score, confidence, conflict, direction = summarize_components(
+        selected
     )
-    score = signed_total / normalizer if normalizer else 0.0
-    conflict = 1.0 - abs(signed_total) / absolute_total if absolute_total else 0.0
-    confidence = normalizer / len(selected) * (1 - conflict)
     return {
         **signal,
         "score": round(score, 2),
-        "confidence": round(max(0.0, min(1.0, confidence)), 4),
-        "conflict": round(max(0.0, min(1.0, conflict)), 4),
-        "evidence_event_ids": sorted(event_ids),
-        "components": {"events": selected},
+        "direction": direction,
+        "confidence": round(confidence, 4),
+        "conflict": round(conflict, 4),
+        "evidence_event_ids": sorted(
+            int(item["event_id"])
+            for item in selected
+            if not item.get("expired")
+            and item.get("direction") in {"bullish", "bearish"}
+        ),
+        "components": {
+            "research_score": round(research_score, 2),
+            "decision_score": round(score, 2),
+            "events": selected,
+        },
     }
 
 
@@ -336,6 +359,7 @@ def aggregate_trend_opportunities(
                 "event_ids": set(),
                 "weight": 0.0,
                 "weighted_score": 0.0,
+                "weighted_research_score": 0.0,
                 "weighted_confidence": 0.0,
                 "weighted_conflict": 0.0,
                 "as_of": None,
@@ -356,6 +380,10 @@ def aggregate_trend_opportunities(
         )
         group["weight"] += weight
         group["weighted_score"] += float(scoped_signal["score"]) * weight
+        group["weighted_research_score"] += (
+            float((scoped_signal.get("components") or {}).get("research_score") or 0.0)
+            * weight
+        )
         group["weighted_confidence"] += float(scoped_signal["confidence"]) * weight
         group["weighted_conflict"] += float(scoped_signal["conflict"]) * weight
 
@@ -377,6 +405,7 @@ def aggregate_trend_opportunities(
                 "markets": sorted(group["markets"]),
                 "primary_market": primary_market,
                 "score": round(score, 2),
+                "research_score": round(group["weighted_research_score"] / weight, 2),
                 "direction": (
                     "bullish" if score > 5 else "bearish" if score < -5 else "neutral"
                 ),

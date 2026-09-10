@@ -8,12 +8,13 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from ..config import Settings
 from ..db import SessionFactory
-from ..models import Event
+from ..models import Event, IngestionRun, utc_now
 from .analysis import EventAnalyzer
 from .evaluation import OutcomeEvaluator
 from .ingestion import IngestionService, SourceFactory
 from .scoring import rebuild_signal_snapshots
 from .telegram import TelegramCommandService, TelegramDigestService
+from .x_posts import XIngestionService
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class PipelineCoordinator:
         source_factory: SourceFactory | None = None,
         analyzer: EventAnalyzer | None = None,
         evaluator: OutcomeEvaluator | None = None,
+        x_ingestion: XIngestionService | None = None,
     ):
         self.ingestion = (
             IngestionService(session_factory, settings, source_factory=source_factory)
@@ -40,6 +42,9 @@ class PipelineCoordinator:
         self.settings = settings
         self.analyzer = analyzer or EventAnalyzer(settings)
         self.evaluator = evaluator or OutcomeEvaluator(settings=settings)
+        self.x_ingestion = x_ingestion or XIngestionService(
+            session_factory, settings, self.ingestion
+        )
         self.telegram = (
             TelegramDigestService(session_factory, settings)
             if settings.telegram_configured
@@ -53,22 +58,59 @@ class PipelineCoordinator:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="news-pipeline")
         self._lock = threading.Lock()
         self._pipeline_future: Future[None] | None = None
+        self._x_future: Future[set[int]] | None = None
 
     def submit_pipeline(self, trigger: str) -> int:
         with self._lock:
-            if self._pipeline_future and not self._pipeline_future.done():
+            if self.busy:
                 raise PipelineBusyError("已有采集任务正在运行")
             run_id = self.ingestion.create_run(trigger)
             self._pipeline_future = self.executor.submit(self._execute_pipeline, run_id)
             return run_id
 
     def _execute_pipeline(self, run_id: int) -> None:
-        self.ingestion.execute_run(run_id)
+        try:
+            self.ingestion.execute_run(run_id)
+            with self.session_factory() as session:
+                if self.settings.auto_analyze:
+                    self.analyzer.analyze_pending(session)
+                    rebuild_signal_snapshots(session)
+                self.evaluator.evaluate(session)
+        except Exception as exc:
+            logger.exception("Pipeline run %s failed", run_id)
+            try:
+                with self.session_factory() as session:
+                    run = session.get(IngestionRun, run_id)
+                    if run is not None:
+                        message = f"pipeline: {type(exc).__name__}: {exc}"[:1000]
+                        run.errors = [*(run.errors or []), message]
+                        run.status = "failed"
+                        run.completed_at = utc_now()
+                        session.commit()
+            except Exception:
+                logger.exception("Could not persist failure for pipeline run %s", run_id)
+            raise
+
+    def wait_for_pipeline(self) -> None:
+        """Wait for the active pipeline and propagate its exception to the caller."""
+        future = self._pipeline_future
+        if future is not None:
+            future.result()
+
+    def submit_x_ingestion(self) -> Future[set[int]]:
+        with self._lock:
+            if self.busy:
+                raise PipelineBusyError("已有采集任务正在运行")
+            self._x_future = self.executor.submit(self._execute_x_ingestion)
+            return self._x_future
+
+    def _execute_x_ingestion(self) -> set[int]:
+        queued_events = self.x_ingestion.execute()
         with self.session_factory() as session:
             if self.settings.auto_analyze:
                 self.analyzer.analyze_pending(session)
                 rebuild_signal_snapshots(session)
-            self.evaluator.evaluate(session)
+        return queued_events
 
     def submit_analysis(self, event_id: int) -> Future[None]:
         return self.executor.submit(self._execute_analysis, event_id)
@@ -77,7 +119,8 @@ class PipelineCoordinator:
         with self.session_factory() as session:
             event = session.get(Event, event_id)
             if event:
-                self.analyzer.analyze_event(session, event)
+                if event.status != "excluded":
+                    self.analyzer.analyze_event(session, event)
                 rebuild_signal_snapshots(session)
 
     def submit_evaluation(self) -> Future[int]:
@@ -118,7 +161,9 @@ class PipelineCoordinator:
 
     @property
     def busy(self) -> bool:
-        return bool(self._pipeline_future and not self._pipeline_future.done())
+        pipeline_busy = bool(self._pipeline_future and not self._pipeline_future.done())
+        x_busy = bool(self._x_future and not self._x_future.done())
+        return pipeline_busy or x_busy
 
     def shutdown(self) -> None:
         self.executor.shutdown(wait=False, cancel_futures=False)

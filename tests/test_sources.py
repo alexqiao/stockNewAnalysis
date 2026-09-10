@@ -10,6 +10,7 @@ from pydantic import SecretStr, ValidationError
 from trade_news_analysis.config import Settings
 from trade_news_analysis.models import Security
 from trade_news_analysis.services.sources import (
+    BlsEmploymentSituationSource,
     FinnhubCompanyNewsSource,
     GdeltNewsSource,
     SecEdgarFilingsSource,
@@ -106,6 +107,9 @@ def test_sec_edgar_emits_only_recent_material_filings(settings: Settings) -> Non
         configured,
         directory,
         fetcher=fake_fetcher,
+        document_fetcher=lambda _url, _timeout, _headers: (
+            "<html><body>Apple signed a material supply agreement.</body></html>"
+        ),
         now=lambda: NOW,
     ).fetch()
 
@@ -115,6 +119,8 @@ def test_sec_edgar_emits_only_recent_material_filings(settings: Settings) -> Non
     ]
     assert all(article.hinted_symbols == {"AAPL"} for article in result.articles)
     assert result.articles[0].url.endswith("/000032019326000001/aapl-8k.htm")
+    assert "material supply agreement" in result.articles[0].summary
+    assert result.articles[0].raw_data["document_loaded"] is True
 
 
 def test_gdelt_company_query_normalizes_compact_timestamp(settings: Settings) -> None:
@@ -159,6 +165,60 @@ def test_gdelt_base_url_rejects_non_official_hosts() -> None:
         )
 
 
+def test_bls_employment_source_builds_observed_macro_release(settings: Settings) -> None:
+    def fake_fetcher(url: str, _timeout: float, _headers: dict[str, str]) -> Any:
+        series_id = url.split("/data/", 1)[1].split("?", 1)[0]
+        if series_id == "CES0000000001":
+            rows = [
+                {
+                    "year": "2026",
+                    "period": "M08",
+                    "periodName": "August",
+                    "latest": "true",
+                    "value": "159075",
+                },
+                {
+                    "year": "2026",
+                    "period": "M07",
+                    "periodName": "July",
+                    "value": "158913",
+                },
+            ]
+        else:
+            rows = [
+                {
+                    "year": "2026",
+                    "period": "M08",
+                    "periodName": "August",
+                    "latest": "true",
+                    "value": "4.1",
+                }
+            ]
+        return {
+            "status": "REQUEST_SUCCEEDED",
+            "Results": {"series": [{"seriesID": series_id, "data": rows}]},
+        }
+
+    released_at = datetime(2026, 9, 5, 2, tzinfo=UTC)
+    result = BlsEmploymentSituationSource(
+        settings, fetcher=fake_fetcher, now=lambda: released_at
+    ).fetch()
+
+    assert len(result.articles) == 1
+    article = result.articles[0]
+    assert article.source == "BLS Employment Situation"
+    assert article.title == "美国 2026 年 8 月非农就业增加 16.2 万，失业率 4.1%"
+    assert article.raw_data["payroll_change_thousands"] == 162
+    assert "15907.5 万" in article.summary
+    assert "缺少市场一致预期" in article.summary
+    next_run = BlsEmploymentSituationSource(
+        settings,
+        fetcher=fake_fetcher,
+        now=lambda: datetime(2026, 9, 6, 2, tzinfo=UTC),
+    ).fetch()
+    assert article.fingerprint == next_run.articles[0].fingerprint
+
+
 def test_default_source_factory_adds_optional_providers(settings: Settings) -> None:
     configured = settings.model_copy(
         update={
@@ -173,3 +233,4 @@ def test_default_source_factory_adds_optional_providers(settings: Settings) -> N
     assert "Finnhub:AAPL" in names
     assert "SEC EDGAR:AAPL" in names
     assert "GDELT DOC" in names
+    assert "BLS Employment Situation" in names

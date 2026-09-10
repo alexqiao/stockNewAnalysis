@@ -5,7 +5,9 @@
   <p class="eyebrow">{{ event.event_type or "待分类" }} · {{ event.occurred_at or event.updated_at }}</p>
   <div class="panel-heading"><h1>{{ event.title }}</h1><button id="reanalyze" class="secondary" data-event-id="{{ event.id }}">重新分析</button></div>
   <p class="lead">{{ event.summary }}</p>
+  <div class="signals"><span class="tag">需求：{{ event.demand_status }}</span><span class="tag">证据：{{ event.evidence_grade }} · {{ "%.1f"|format(event.evidence_score) }}/5</span></div>
   <h3>已发生的需求变化</h3><p>{{ event.observed_demand or "尚未形成可靠判断。" }}</p>
+  {% if event.missing_proof %}<h3>下一步需要验证</h3><ul>{% for item in event.missing_proof %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
   <div class="signals">{% for theme in event.themes %}<a class="tag" href="/themes/{{ theme.id }}">{{ theme.name }}</a>{% endfor %}</div>
 </section>
 <section class="analysis-panel">
@@ -25,7 +27,8 @@
   {% else %}<div class="empty">尚无与证券主数据唯一匹配的候选。</div>{% endfor %}
 </section>
 {% if event.unresolved_candidates %}<section class="analysis-panel"><h2>待核实候选</h2><p class="muted">以下公司未能与证券主数据唯一匹配，不参与排名。</p><ul>{% for item in event.unresolved_candidates %}<li>{{ item.name }}{% if item.symbol %} · {{ item.symbol }}{% endif %}：{{ item.supply_chain_role }}</li>{% endfor %}</ul></section>{% endif %}
-<section class="analysis-panel"><h2>原始证据</h2><ul>{% for article in event.articles %}<li><a href="/news/{{ article.id }}">{{ article.title }}</a> · {{ article.source }}</li>{% endfor %}</ul></section>
+<section class="analysis-panel"><h2>事实证据</h2><ul>{% for article in event.articles if article.content_kind != "social_post" and article.analysis_eligible %}<li><a href="/news/{{ article.id }}">{{ article.title }}</a> · {{ article.source }}</li>{% else %}<li class="muted">暂无非社交事实来源。</li>{% endfor %}</ul></section>
+<section class="analysis-panel"><h2>博主观点与线索</h2><p class="muted">个人博主内容默认不增加事实证据质量。</p>{% for post in event.x_posts %}<article class="social-post"><div class="meta"><span>@{{ post.account.handle }} · {{ post.screening.classification or "待分类" }}</span><span>{{ post.published_at }}</span></div><p>{{ post.text or "（无文字，仅媒体）" }}</p>{% if post.quoted_text %}<blockquote>引用 @{{ post.quoted_author_handle }}：{{ post.quoted_text }}</blockquote>{% endif %}<a class="external" href="{{ post.url }}" target="_blank" rel="noopener noreferrer">查看原帖 ↗</a></article>{% else %}<div class="empty">暂无关联博主内容。</div>{% endfor %}</section>
 {% endblock %}
 {% block scripts %}<script>
 document.getElementById('reanalyze').addEventListener('click', async function () {

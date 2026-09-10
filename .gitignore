@@ -10,6 +10,7 @@ htmlcov/
 data/*.db
 data/*.db-*
 data/telegram_update_offset*
+data/x-browser-profile/
 dist/
 build/
 *.egg-info/

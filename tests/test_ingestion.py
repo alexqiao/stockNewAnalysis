@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from trade_news_analysis.config import Settings
 from trade_news_analysis.db import SessionFactory
-from trade_news_analysis.models import Article, Event, EventArticle, IngestionRun, Security
+from trade_news_analysis.models import (
+    Article,
+    Event,
+    EventArticle,
+    IngestionRun,
+    Security,
+    SourceHealth,
+)
+from trade_news_analysis.services.coordinator import PipelineCoordinator
 from trade_news_analysis.services.ingestion import IngestionService
 from trade_news_analysis.services.normalization import NormalizedArticle
 from trade_news_analysis.services.providers import SecurityRecord
@@ -220,6 +229,112 @@ def test_source_failure_is_recorded_without_crashing_run(
         assert run is not None
         assert run.status == "partial"
         assert "TimeoutError" in run.errors[0]
+
+
+def test_source_backoff_handles_sqlite_naive_timestamp(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    class BackedOffSource:
+        name = "backed-off"
+        markets: tuple[str, ...] = ("US",)
+        coverage = "tracked"
+        called = False
+
+        def fetch(self) -> SourceResult:
+            self.called = True
+            raise AssertionError("backed-off source should not be fetched")
+
+    source = BackedOffSource()
+    with session_factory() as session:
+        session.add(
+            SourceHealth(
+                source=source.name,
+                consecutive_failures=3,
+                items_last_run=0,
+                last_attempt_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+        )
+        session.commit()
+
+    service = IngestionService(
+        session_factory,
+        settings,
+        source_factory=lambda _securities, _settings: [source],
+        master_factory=no_master,
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id)
+
+    with session_factory() as session:
+        run = session.get(IngestionRun, run_id)
+        assert run is not None
+        assert run.status == "complete"
+    assert source.called is False
+
+
+def test_security_master_backoff_skips_recent_failing_provider(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    class BackedOffMaster:
+        name = "backed-off-master"
+        markets: tuple[str, ...] = ("A",)
+        called = False
+
+        def fetch_securities(self) -> list[SecurityRecord]:
+            self.called = True
+            raise AssertionError("backed-off provider should not be fetched")
+
+    provider = BackedOffMaster()
+    with session_factory() as session:
+        session.add(
+            SourceHealth(
+                source=provider.name,
+                capability="security_master",
+                consecutive_failures=3,
+                items_last_run=0,
+                last_attempt_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+        )
+        session.commit()
+
+    service = IngestionService(
+        session_factory,
+        settings,
+        source_factory=lambda _securities, _settings: [],
+        master_factory=lambda _settings: provider,
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id)
+
+    with session_factory() as session:
+        run = session.get(IngestionRun, run_id)
+        assert run is not None
+        assert run.status == "complete"
+    assert provider.called is False
+
+
+def test_coordinator_records_and_propagates_unhandled_pipeline_error(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    def broken_factory(_securities: list[Security], _settings: Settings) -> list[NewsSource]:
+        raise TypeError("unexpected pipeline failure")
+
+    coordinator = PipelineCoordinator(
+        session_factory,
+        settings.model_copy(update={"auto_analyze": False}),
+        source_factory=broken_factory,
+    )
+    run_id = coordinator.submit_pipeline("test")
+    with pytest.raises(TypeError, match="unexpected pipeline failure"):
+        coordinator.wait_for_pipeline()
+    coordinator.shutdown()
+
+    with session_factory() as session:
+        run = session.get(IngestionRun, run_id)
+        assert run is not None
+        assert run.status == "failed"
+        assert run.completed_at is not None
+        assert "TypeError: unexpected pipeline failure" in run.errors[-1]
 
 
 def test_ingestion_tracks_macro_research_assets(

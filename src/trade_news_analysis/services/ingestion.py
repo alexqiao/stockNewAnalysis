@@ -28,6 +28,7 @@ from .sources import NewsSource, build_default_sources
 
 SourceFactory = Callable[[list[Security], Settings], list[NewsSource]]
 MasterFactory = Callable[[Settings], SecurityMasterProvider | None]
+SOURCE_FAILURE_BACKOFF = timedelta(hours=6)
 
 
 class IngestionService:
@@ -115,6 +116,15 @@ class IngestionService:
         return health
 
     @staticmethod
+    def _in_failure_backoff(health: SourceHealth) -> bool:
+        return bool(
+            (health.consecutive_failures or 0) >= 3
+            and health.last_attempt_at is not None
+            and ensure_aware(health.last_attempt_at)
+            > utc_now() - SOURCE_FAILURE_BACKOFF
+        )
+
+    @staticmethod
     def _upsert_security(session: Session, record: SecurityRecord) -> Security:
         security = session.scalar(
             select(Security).where(
@@ -146,8 +156,9 @@ class IngestionService:
         security.industry = (
             security.industry if is_research_asset else record.industry or security.industry
         )
-        security.business_summary = record.business_summary
-        security.market_cap = record.market_cap
+        security.business_summary = record.business_summary or security.business_summary
+        if record.market_cap is not None:
+            security.market_cap = record.market_cap
         security.currency = record.currency
         security.timezone = record.timezone
         security.calendar = record.calendar
@@ -167,13 +178,23 @@ class IngestionService:
         health = self._source_health(
             session, provider.name, "security_master", list(provider.markets), "broad"
         )
+        if self._in_failure_backoff(health):
+            return
         health.last_attempt_at = utc_now()
         try:
             records = provider.fetch_securities()
             for record in records:
                 self._upsert_security(session, record)
             health.last_success_at = utc_now()
-            health.last_error = None
+            market_errors = getattr(provider, "market_errors", {})
+            health.last_error = (
+                "; ".join(
+                    f"{market}: {error}" for market, error in market_errors.items()
+                )[:1000]
+                or None
+            )
+            if market_errors:
+                health.coverage = "partial"
             health.consecutive_failures = 0
             health.items_last_run = len(records)
         except Exception as exc:
@@ -264,6 +285,8 @@ class IngestionService:
                     list(getattr(source, "markets", ())),
                     getattr(source, "coverage", "partial"),
                 )
+                if self._in_failure_backoff(health):
+                    continue
                 health.last_attempt_at = utc_now()
                 try:
                     result = source.fetch()

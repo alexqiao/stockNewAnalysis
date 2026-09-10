@@ -16,12 +16,13 @@ from trade_news_analysis.models import (
     EventSecurityImpact,
     Theme,
 )
-from trade_news_analysis.services.analysis import EventAnalyzer, extract_json
+from trade_news_analysis.services.analysis import EventAnalyzer, build_event_prompt, extract_json
 
 VALID_EVENT_PAYLOAD = {
     "canonical_title": "企业开始采用苹果付费服务",
     "event_type": "product_adoption",
     "observed_demand": "企业客户已经开始付费，属于可观察需求。",
+    "demand_status": "observed",
     "themes": ["企业软件"],
     "candidates": [
         {
@@ -42,6 +43,7 @@ VALID_EVENT_PAYLOAD = {
         },
     ],
     "evidence": ["摘要称企业客户已经开始付费"],
+    "missing_proof": ["下一季度付费客户收入"],
 }
 
 VALID_IMPACT_PAYLOAD = {
@@ -95,6 +97,17 @@ def test_extract_json_accepts_fenced_output() -> None:
     assert json.loads(extract_json(text))["event_type"] == "product_adoption"
 
 
+def test_event_prompt_treats_official_macro_release_as_observed(
+    session: Session,
+) -> None:
+    event = add_pending_event(session)
+
+    prompt = build_event_prompt(event)
+
+    assert "官方已发布的就业" in prompt
+    assert "必须使用 observed" in prompt
+
+
 def test_analyzer_forwards_disabled_thinking_mode(settings: Settings) -> None:
     configured = settings.model_copy(
         update={"llm_api_key": SecretStr("test-key"), "llm_thinking": "disabled"}
@@ -114,6 +127,9 @@ def test_two_stage_analysis_resolves_only_known_security(
     result = EventAnalyzer(settings, completion=completion).analyze_event(session, event)
     assert result.status == "complete"
     assert result.observed_demand.startswith("企业客户")
+    assert result.demand_status == "observed"
+    assert result.evidence_grade == "weak"
+    assert result.missing_proof == ["下一季度付费客户收入"]
     assert session.scalar(select(func.count()).select_from(Theme)) == 1
     assert session.scalar(select(func.count()).select_from(EventSecurityImpact)) == 1
     impact = session.scalar(select(EventSecurityImpact))
@@ -146,3 +162,30 @@ def test_analyzer_without_key_is_unavailable(session: Session, settings: Setting
     result = EventAnalyzer(settings).analyze_event(session, event)
     assert result.status == "unavailable"
     assert result.error == "LLM未配置"
+
+
+def test_narrative_only_event_stays_out_of_ranked_impacts(
+    session: Session, settings: Settings
+) -> None:
+    event = add_pending_event(session)
+    narrative_payload = {
+        **VALID_EVENT_PAYLOAD,
+        "observed_demand": "仅有叙事，尚无订单或收入证据。",
+        "demand_status": "narrative_only",
+    }
+    analyzer = EventAnalyzer(
+        settings,
+        completion=lambda _system, _prompt: json.dumps(
+            narrative_payload, ensure_ascii=False
+        ),
+    )
+
+    result = analyzer.analyze_event(session, event)
+
+    assert result.status == "complete"
+    assert result.demand_status == "narrative_only"
+    assert session.scalar(select(func.count()).select_from(EventSecurityImpact)) == 0
+    assert all(
+        item["research_status"] == "narrative_only"
+        for item in result.unresolved_candidates
+    )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
@@ -25,10 +25,21 @@ from .models import (
     SourceHealth,
     Theme,
     Watchlist,
+    XAccount,
+    XPost,
 )
-from .schemas import PEAnalysisUpdate, RunResponse, WatchlistInput, WatchlistReplace
+from .schemas import (
+    PEAnalysisUpdate,
+    RunResponse,
+    WatchlistInput,
+    WatchlistReplace,
+    XAccountInput,
+    XAccountUpdate,
+    XPostDecision,
+)
 from .services import opportunities as opportunity_service
 from .services.coordinator import PipelineBusyError, PipelineCoordinator
+from .services.judgment import build_watchlist_judgment
 from .services.metrics import build_metrics
 from .services.pe_analysis import (
     analysis_response,
@@ -38,6 +49,7 @@ from .services.pe_analysis import (
     record_refresh_error,
 )
 from .services.providers import lookup_security_record
+from .services.research_quality import company_data_quality
 from .services.scoring import DIRECTION_SIGN
 
 api_router = APIRouter(prefix="/api/v1")
@@ -66,6 +78,7 @@ def _require_watchlisted_security(session: Session, security_id: int) -> Securit
 
 def _security_brief(security: Security) -> dict[str, Any]:
     provider_data = security.provider_data or {}
+    data_quality, data_gaps = company_data_quality(security)
     return {
         "id": security.id,
         "market": security.market,
@@ -77,6 +90,8 @@ def _security_brief(security: Security) -> dict[str, Any]:
         "currency": security.currency,
         "opportunity_group": provider_data.get("opportunity_group"),
         "opportunity_scope": provider_data.get("opportunity_scope"),
+        "data_quality": data_quality,
+        "data_gaps": data_gaps,
     }
 
 
@@ -206,6 +221,10 @@ def _event_dict(event: Event) -> dict[str, Any]:
         "summary": event.summary,
         "event_type": event.event_type,
         "observed_demand": event.observed_demand,
+        "demand_status": event.demand_status,
+        "evidence_grade": event.evidence_grade,
+        "evidence_score": event.evidence_score,
+        "missing_proof": event.missing_proof,
         "occurred_at": event.occurred_at,
         "updated_at": event.updated_at,
         "themes": [
@@ -219,6 +238,10 @@ def _event_dict(event: Event) -> dict[str, Any]:
                 "title": link.article.title,
                 "url": link.article.canonical_url,
                 "published_at": link.article.published_at,
+                "content_kind": link.article.content_kind,
+                "evidence_role": link.article.evidence_role,
+                "author_handle": link.article.author_handle,
+                "analysis_eligible": link.article.analysis_eligible,
             }
             for link in event.article_links
         ],
@@ -241,6 +264,10 @@ def _article_dict(article: Article) -> dict[str, Any]:
         "url": article.canonical_url,
         "published_at": article.published_at,
         "fetched_at": article.fetched_at,
+        "content_kind": article.content_kind,
+        "evidence_role": article.evidence_role,
+        "author_handle": article.author_handle,
+        "analysis_eligible": article.analysis_eligible,
         "events": [
             {
                 "id": link.event.id,
@@ -255,6 +282,43 @@ def _article_dict(article: Article) -> dict[str, Any]:
             }
             for link in article.event_links
         ],
+    }
+
+
+def _x_account_dict(account: XAccount) -> dict[str, Any]:
+    return {
+        "id": account.id,
+        "handle": account.handle,
+        "display_name": account.display_name,
+        "account_type": account.account_type,
+        "tags": account.tags,
+        "priority": account.priority,
+        "active": account.active,
+        "created_at": account.created_at,
+        "updated_at": account.updated_at,
+    }
+
+
+def _x_post_dict(post: XPost) -> dict[str, Any]:
+    return {
+        "id": post.id,
+        "account": _x_account_dict(post.account),
+        "post_id": post.post_id,
+        "url": post.url,
+        "post_type": post.post_type,
+        "text": post.text,
+        "quoted_post_id": post.quoted_post_id,
+        "quoted_author_handle": post.quoted_author_handle,
+        "quoted_text": post.quoted_text,
+        "external_links": post.external_links,
+        "media": post.media,
+        "public_metrics": post.public_metrics,
+        "published_at": post.published_at,
+        "fetched_at": post.fetched_at,
+        "screening_status": post.screening_status,
+        "screening": post.screening,
+        "promoted_article_id": post.promoted_article_id,
+        "related_event_id": post.related_event_id,
     }
 
 
@@ -279,11 +343,14 @@ def _latest_snapshot_map(
 def _signal_dict(snapshot: SecuritySignalSnapshot | None) -> dict[str, Any] | None:
     if snapshot is None:
         return None
+    components = snapshot.components or {}
     return {
         "id": snapshot.id,
         "as_of": snapshot.as_of,
         "horizon": snapshot.horizon,
         "score": snapshot.score,
+        "research_score": components.get("research_score", snapshot.score),
+        "decision_score": components.get("decision_score", snapshot.score),
         "direction": snapshot.direction,
         "confidence": snapshot.confidence,
         "conflict": snapshot.conflict,
@@ -322,12 +389,13 @@ def list_opportunities(
     theme: str | None = None,
     horizon: int = Query(default=5),
     limit: int = Query(default=50, ge=1, le=200),
+    direction: str = Query(default="bullish", pattern="^(bullish|bearish)$"),
 ) -> list[dict[str, Any]]:
     if horizon not in VALID_HORIZONS:
         raise HTTPException(status_code=422, detail="horizon 只能是 1、5 或 20")
     with _session(request) as session:
         return opportunity_service.list_security_opportunities(
-            session, market, theme, horizon, limit
+            session, market, theme, horizon, limit, direction
         )
 
 
@@ -724,7 +792,15 @@ def get_event(event_id: int, request: Request) -> dict[str, Any]:
         event = session.scalar(_event_query().where(Event.id == event_id))
         if event is None:
             raise HTTPException(status_code=404, detail="事件不存在")
-        return _event_dict(event)
+        result = _event_dict(event)
+        social_posts = session.scalars(
+            select(XPost)
+            .where(XPost.related_event_id == event_id)
+            .options(selectinload(XPost.account))
+            .order_by(XPost.published_at.desc())
+        ).all()
+        result["x_posts"] = [_x_post_dict(item) for item in social_posts]
+        return result
 
 
 @api_router.post("/events/{event_id}/analyses", status_code=status.HTTP_202_ACCEPTED)
@@ -813,6 +889,106 @@ def get_news(article_id: int, request: Request) -> dict[str, Any]:
         if article is None:
             raise HTTPException(status_code=404, detail="新闻不存在")
         return _article_dict(article)
+
+
+@api_router.get("/x/accounts")
+def list_x_accounts(request: Request) -> list[dict[str, Any]]:
+    with _session(request) as session:
+        accounts = session.scalars(
+            select(XAccount).order_by(XAccount.priority, XAccount.id)
+        ).all()
+        return [_x_account_dict(item) for item in accounts]
+
+
+@api_router.post("/x/accounts", status_code=status.HTTP_201_CREATED)
+def create_x_account(payload: XAccountInput, request: Request) -> dict[str, Any]:
+    with _session(request) as session:
+        existing = session.scalar(
+            select(XAccount).where(XAccount.handle.ilike(payload.handle))
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="该 X 账号已存在")
+        account = XAccount(**payload.model_dump())
+        if not account.display_name:
+            account.display_name = account.handle
+        session.add(account)
+        session.commit()
+        return _x_account_dict(account)
+
+
+@api_router.patch("/x/accounts/{account_id}")
+def update_x_account(
+    account_id: int, payload: XAccountUpdate, request: Request
+) -> dict[str, Any]:
+    with _session(request) as session:
+        account = session.get(XAccount, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="X 账号不存在")
+        for name, value in payload.model_dump(exclude_unset=True).items():
+            setattr(account, name, value)
+        account.updated_at = datetime.now(UTC)
+        session.commit()
+        return _x_account_dict(account)
+
+
+@api_router.get("/x/posts")
+def list_x_posts(
+    request: Request,
+    account_id: int | None = Query(default=None, gt=0),
+    screening_status: str | None = Query(default=None, max_length=20),
+    classification: str | None = Query(default=None, max_length=20),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    with _session(request) as session:
+        query = (
+            select(XPost)
+            .options(selectinload(XPost.account))
+            .order_by(XPost.published_at.desc(), XPost.id.desc())
+        )
+        if account_id is not None:
+            query = query.where(XPost.account_id == account_id)
+        if screening_status:
+            query = query.where(XPost.screening_status == screening_status)
+        posts = session.scalars(query.limit(limit * 3)).all()
+        if classification:
+            posts = [
+                item
+                for item in posts
+                if str((item.screening or {}).get("classification")) == classification
+            ]
+        return [_x_post_dict(item) for item in posts[:limit]]
+
+
+@api_router.post("/x/posts/{post_id}/decision")
+def decide_x_post(
+    post_id: int, payload: XPostDecision, request: Request
+) -> dict[str, Any]:
+    coordinator = _coordinator(request)
+    with _session(request) as session:
+        try:
+            event_id = coordinator.x_ingestion.apply_decision(
+                session,
+                post_id,
+                payload.decision,
+                event_id=payload.event_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        session.commit()
+    if event_id is not None:
+        coordinator.submit_analysis(event_id)
+    return {"post_id": post_id, "decision": payload.decision, "event_id": event_id}
+
+
+@api_router.post("/runs/x-ingest", status_code=status.HTTP_202_ACCEPTED)
+def start_x_ingestion(request: Request) -> dict[str, str]:
+    try:
+        _coordinator(request).submit_x_ingestion()
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "queued"}
 
 
 @api_router.get("/metrics")
@@ -914,6 +1090,8 @@ def health(request: Request) -> dict[str, Any]:
             "semantic_clustering": semantic_clustering,
             "scheduler_enabled": request.app.state.settings.scheduler_enabled,
             "pipeline_busy": _coordinator(request).busy,
+            "x_browser_enabled": request.app.state.settings.x_browser_enabled,
+            "x_fetch_interval_hours": request.app.state.settings.x_fetch_interval_hours,
             "latest_run": (
                 RunResponse.model_validate(latest_run).model_dump() if latest_run else None
             ),
@@ -948,10 +1126,60 @@ def dashboard(
     with _session(request) as session:
         ids = {item["security_id"] for item in watchlist}
         snapshots = _latest_snapshot_map(session, horizon, ids)
-        watchlist_rows = [
-            {**item, "signal": _signal_dict(snapshots.get(item["security_id"]))}
-            for item in watchlist
-        ]
+        signals = {
+            security_id: _signal_dict(snapshot)
+            for security_id, snapshot in snapshots.items()
+        }
+        evidence_event_ids = {
+            int(event_id)
+            for signal in signals.values()
+            if signal is not None
+            for event_id in signal.get("evidence_event_ids") or []
+        }
+        event_titles: dict[int, str] = (
+            {
+                event_id: title
+                for event_id, title in session.execute(
+                    select(Event.id, Event.title).where(Event.id.in_(evidence_event_ids))
+                )
+            }
+            if evidence_event_ids
+            else {}
+        )
+        macro_row = session.execute(
+            select(Event.id, Article.title, Article.summary, Article.published_at)
+            .join(EventArticle, EventArticle.event_id == Event.id)
+            .join(Article, Article.id == EventArticle.article_id)
+            .where(
+                Article.source == "BLS Employment Situation",
+                Article.published_at >= datetime.now(UTC) - timedelta(days=7),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(1)
+        ).first()
+        macro_context = (
+            {
+                "event_id": macro_row.id,
+                "title": macro_row.title,
+                "summary": macro_row.summary,
+                "published_at": macro_row.published_at,
+                "direction_note": "已纳入宏观背景；缺少市场一致预期，暂不计入个股方向",
+            }
+            if macro_row is not None
+            else None
+        )
+        watchlist_rows = []
+        for item in watchlist:
+            signal = signals.get(item["security_id"])
+            watchlist_rows.append(
+                {
+                    **item,
+                    "signal": signal,
+                    "judgment": build_watchlist_judgment(
+                        signal, item["pe_analysis"], event_titles, macro_context
+                    ),
+                }
+            )
         events = session.scalars(
             _event_query().order_by(Event.occurred_at.desc(), Event.id.desc()).limit(12)
         ).unique().all()
@@ -1045,6 +1273,39 @@ def watchlist_page(request: Request) -> HTMLResponse:
         request=request,
         name="watchlist.html",
         context={"items": get_watchlist(request)},
+    )
+
+
+@web_router.get("/x", response_class=HTMLResponse)
+def x_posts_page(
+    request: Request,
+    account_id: int | None = None,
+    screening_status: str | None = None,
+) -> HTMLResponse:
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="x_posts.html",
+        context={
+            "posts": list_x_posts(
+                request,
+                account_id=account_id,
+                screening_status=screening_status,
+                classification=None,
+                limit=200,
+            ),
+            "accounts": list_x_accounts(request),
+            "selected_account_id": account_id,
+            "selected_status": screening_status,
+        },
+    )
+
+
+@web_router.get("/x/accounts", response_class=HTMLResponse)
+def x_accounts_page(request: Request) -> HTMLResponse:
+    return request.app.state.templates.TemplateResponse(
+        request=request,
+        name="x_accounts.html",
+        context={"accounts": list_x_accounts(request)},
     )
 
 
