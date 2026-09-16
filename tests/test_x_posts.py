@@ -5,8 +5,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
 
 from trade_news_analysis.config import DEFAULT_X_ACCOUNTS, Settings
 from trade_news_analysis.db import SessionFactory
@@ -15,6 +17,7 @@ from trade_news_analysis.models import (
     Article,
     Event,
     EventArticle,
+    SourceHealth,
     XAccount,
     XPost,
 )
@@ -133,6 +136,92 @@ def test_database_seeds_curated_x_accounts(session_factory: SessionFactory) -> N
         assert {item.account_type for item in accounts} == {"commentator"}
 
 
+def test_truncated_public_fact_stays_in_review_with_coverage(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    item = browser_post("888")
+    item.raw_data = {"is_truncated": True}
+    fetcher = FakeFetcher([item])
+    fetcher.coverage = "public_page"  # type: ignore[attr-defined]
+    with session_factory() as session:
+        account = session.scalar(select(XAccount).where(XAccount.handle == DEFAULT_X_ACCOUNTS[0]))
+        assert account is not None
+        account.account_type = "company"
+        session.commit()
+
+    assert x_service(session_factory, settings, fetcher).execute() == set()
+
+    with session_factory() as session:
+        saved = session.scalar(select(XPost).where(XPost.post_id == "888"))
+        assert saved is not None
+        assert saved.screening_status == "review"
+        assert saved.promoted_article_id is None
+        assert "打开原帖核对完整正文" in saved.screening["verification_needs"]
+        health = session.scalar(select(SourceHealth).where(
+            SourceHealth.source == f"X:@{DEFAULT_X_ACCOUNTS[0]}"
+        ))
+        assert health is not None and health.coverage == "public_page"
+        assert health.last_success_at is not None
+
+
+def test_public_summary_never_overwrites_full_post_and_full_text_can_be_rescreened(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    item = browser_post("777")
+    service = x_service(session_factory, settings, FakeFetcher([item]))
+    with session_factory() as session:
+        account = session.scalar(select(XAccount).where(XAccount.handle == DEFAULT_X_ACCOUNTS[0]))
+        assert account is not None
+        post, _ = service._upsert_post(session, account, item)
+        full_text = post.text
+        post.screening_status = "context"
+        post.screening = {"classification": "opinion"}
+        item.text = "Only a summary…"
+        item.raw_data = {"is_truncated": True}
+        post, created = service._upsert_post(session, account, item)
+        assert not created
+        assert post.text == full_text
+        assert post.screening == {"classification": "opinion"}
+
+        short = browser_post("778")
+        short.raw_data = {"is_truncated": True}
+        post, _ = service._upsert_post(session, account, short)
+        post.screening_status = "review"
+        post.screening = {"classification": "fact"}
+        short.raw_data = {"is_truncated": False}
+        short.text = "Now includes the full announcement."
+        post, _ = service._upsert_post(session, account, short)
+        assert post.text == short.text
+        assert post.screening == {}
+
+
+def test_failed_account_does_not_return_rolled_back_event_ids(
+    session_factory: SessionFactory, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = x_service(session_factory, settings, FakeFetcher([
+        browser_post("901"), browser_post("902")
+    ]))
+    with session_factory() as session:
+        account = session.scalar(select(XAccount).where(XAccount.handle == DEFAULT_X_ACCOUNTS[0]))
+        assert account is not None
+        account.account_type = "company"
+        session.commit()
+    original_upsert = service._upsert_post
+
+    def failing_upsert(
+        session: Session, account: XAccount, item: BrowserPost
+    ) -> tuple[XPost, bool]:
+        if item.post_id == "902":
+            raise RuntimeError("second post failed")
+        return original_upsert(session, account, item)
+
+    monkeypatch.setattr(service, "_upsert_post", failing_upsert)
+    assert service.execute() == set()
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Event)) == 0
+        assert session.scalar(select(func.count()).select_from(XPost)) == 0
+
+
 def test_x_ingestion_filters_types_and_keeps_commentator_fact_for_review(
     session_factory: SessionFactory, settings: Settings
 ) -> None:
@@ -156,6 +245,114 @@ def test_x_ingestion_filters_types_and_keeps_commentator_fact_for_review(
         assert {item.screening_status for item in posts} == {"review"}
         assert all(item.promoted_article_id is None for item in posts)
         assert session.scalar(select(func.count()).select_from(Article)) == 0
+
+
+def test_x_ingestion_retries_failed_screening_once_provider_recovers(
+    session_factory: SessionFactory, settings: Settings
+) -> None:
+    calls: list[str] = []
+
+    def completion(_system: str, prompt: str) -> str:
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise RuntimeError("temporary provider failure")
+        return json.dumps(SCREENING, ensure_ascii=False)
+
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("1101")]))
+    service.screener = XPostScreener(settings, completion=completion)
+    assert service.execute() == set()
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "1101"))
+        assert post is not None
+        assert post.screening_status == "review"
+        assert "error" in post.screening
+
+    assert service.execute() == set()
+    assert service.execute() == set()
+
+    assert len(calls) == 2
+    with session_factory() as session:
+        posts = session.scalars(select(XPost).where(XPost.post_id == "1101")).all()
+        assert len(posts) == 1
+        assert posts[0].screening == SCREENING
+        assert posts[0].screening_status == "review"
+        assert posts[0].promoted_article_id is None
+
+
+@pytest.mark.parametrize("status", ["pending", "review"])
+@pytest.mark.parametrize("screening", [{}, {"error": ""}])
+def test_x_ingestion_retries_existing_posts_without_successful_screening(
+    session_factory: SessionFactory,
+    settings: Settings,
+    status: str,
+    screening: dict[str, object],
+) -> None:
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("1201")]))
+    service.execute()
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "1201"))
+        assert post is not None
+        post.screening_status = status
+        post.screening = screening
+        session.commit()
+
+    calls: list[str] = []
+
+    def completion(_system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return json.dumps(SCREENING, ensure_ascii=False)
+
+    service.screener = XPostScreener(settings, completion=completion)
+    service.execute()
+    service.execute()
+
+    assert len(calls) == 1
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "1201"))
+        assert post is not None
+        assert post.screening == SCREENING
+        assert post.screening_status == "review"
+
+
+@pytest.mark.parametrize(
+    ("status", "screening"),
+    [
+        (status, screening)
+        for status in ("context", "ignore", "ignored", "promoted")
+        for screening in ({}, {"error": "prior failure"})
+    ]
+    + [("review", SCREENING), ("pending", SCREENING)],
+)
+def test_x_ingestion_preserves_decisions_and_successful_screening(
+    session_factory: SessionFactory,
+    settings: Settings,
+    status: str,
+    screening: dict[str, object],
+) -> None:
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("1301")]))
+    service.execute()
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "1301"))
+        assert post is not None
+        post.screening_status = status
+        post.screening = screening
+        session.commit()
+
+    calls: list[str] = []
+
+    def completion(_system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return json.dumps(SCREENING, ensure_ascii=False)
+
+    service.screener = XPostScreener(settings, completion=completion)
+    service.execute()
+
+    assert calls == []
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "1301"))
+        assert post is not None
+        assert post.screening_status == status
+        assert post.screening == screening
 
 
 def test_trusted_account_auto_promotes_and_manual_retraction_excludes_event(

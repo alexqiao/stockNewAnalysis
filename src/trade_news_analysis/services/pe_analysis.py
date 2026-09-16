@@ -45,13 +45,15 @@ def get_or_create_profile(session: Session, security: Security) -> PEAnalysisPro
 
 def apply_update(profile: PEAnalysisProfile, payload: PEAnalysisUpdate) -> None:
     overrides = payload.overrides
+    now = utc_now()
     profile.fiscal_year_override = overrides.fiscal_year
     profile.price_override = overrides.price
+    profile.manual_price_updated_at = now if overrides.price is not None else None
     profile.shares_outstanding_override = overrides.shares_outstanding
     profile.revenue_override = overrides.revenue
     profile.net_income_override = overrides.net_income
     profile.assumptions = [item.model_dump() for item in payload.assumptions]
-    profile.updated_at = utc_now()
+    profile.updated_at = now
 
 
 def apply_snapshot(
@@ -263,6 +265,13 @@ def analysis_response(
         "valuation_label": valuation["label"],
         "valuation_year": valuation["year"],
         "current_price": valuation["current_price"],
+        "price_as_of": (
+            profile.manual_price_updated_at
+            if profile and overrides["price"] is not None
+            else profile.source_fetched_at if profile else None
+        ),
+        "price_provenance": effective_inputs["price"]["provenance"],
+        "source_status": profile.source_status if profile else "uninitialized",
         "forward_eps": valuation["eps"],
         "pe_low": valuation["pe_low"],
         "pe_high": valuation["pe_high"],

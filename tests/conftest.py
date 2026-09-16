@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic_settings import SettingsConfigDict
 from sqlalchemy.orm import Session
 
 from trade_news_analysis.config import Settings
@@ -15,9 +16,13 @@ from trade_news_analysis.db import (
 )
 
 
+class IsolatedSettings(Settings):
+    model_config = SettingsConfigDict(env_file=None)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(
+    return IsolatedSettings(
         database_url=f"sqlite:///{tmp_path / 'test.db'}",
         scheduler_enabled=False,
         seed_watchlist="AAPL,MSFT",

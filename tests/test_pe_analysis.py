@@ -5,12 +5,42 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from trade_news_analysis.models import PEAnalysisProfile, Security
+from trade_news_analysis.schemas import PEAnalysisUpdate
 from trade_news_analysis.services.pe_analysis import (
     analysis_response,
+    apply_update,
     calculate_forecast,
     default_assumptions,
     is_refresh_recommended,
+    record_refresh_error,
 )
+
+
+def test_refresh_failure_does_not_renew_confirmed_price() -> None:
+    old = datetime(2026, 9, 1, tzinfo=UTC)
+    profile = PEAnalysisProfile(
+        source_price=100, source_fetched_at=old, assumptions=default_assumptions(),
+    )
+    security = Security(market="US", symbol="TEST", name="Test", currency="USD")
+    record_refresh_error(profile, RuntimeError("unavailable"), old + timedelta(days=7))
+    assert analysis_response(security, profile)["summary"]["price_as_of"] == old
+
+    payload = PEAnalysisUpdate.model_validate({
+        "overrides": {"price": 120}, "assumptions": default_assumptions(),
+    })
+    apply_update(profile, payload)
+    confirmed = profile.manual_price_updated_at
+    assert confirmed is not None
+    record_refresh_error(profile, RuntimeError("unavailable"), confirmed + timedelta(days=7))
+    summary = analysis_response(security, profile)["summary"]
+    assert summary["price_as_of"] == confirmed
+    assert summary["price_provenance"] == "manual"
+
+    apply_update(profile, PEAnalysisUpdate.model_validate({
+        "overrides": {}, "assumptions": default_assumptions(),
+    }))
+    assert profile.manual_price_updated_at is None
+    assert analysis_response(security, profile)["summary"]["price_as_of"] == old
 
 
 def amd_assumptions() -> list[dict[str, float | int | None]]:

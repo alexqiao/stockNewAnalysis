@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import pow
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..models import EventSecurityImpact, Security, SecuritySignalSnapshot
+from ..models import Event, EventSecurityImpact, Security, SecuritySignalSnapshot
 from .evidence import is_narrative_only
 
 HORIZONS = (1, 5, 20)
@@ -49,8 +49,8 @@ def trading_sessions_since(occurred_at: datetime | None, as_of: datetime) -> int
     """Count weekday sessions without assuming a single market timezone."""
     if occurred_at is None:
         return 0
-    start = occurred_at.astimezone(UTC).date()
-    end = as_of.astimezone(UTC).date()
+    start = _utc(occurred_at).date()
+    end = _utc(as_of).date()
     if end <= start:
         return 0
     days = 0
@@ -60,6 +60,22 @@ def trading_sessions_since(occurred_at: datetime | None, as_of: datetime) -> int
         if cursor.weekday() < 5:
             days += 1
     return days
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def event_is_available(event: Event, as_of: datetime) -> bool:
+    """Reject withdrawn and future-dated evidence without rewriting source records."""
+    return (
+        event.status != "excluded"
+        and not is_narrative_only(event)
+        and (
+            event.occurred_at is None
+            or _utc(event.occurred_at) <= _utc(as_of) + timedelta(minutes=5)
+        )
+    )
 
 
 def freshness_decay(age_sessions: int, horizon: int) -> float:
@@ -123,7 +139,7 @@ def aggregate_security(
         item
         for item in security.impacts
         if item.status == "complete" and item.is_current and str(horizon) in item.impacts
-        and not is_narrative_only(item.event)
+        and event_is_available(item.event, as_of)
     ]
     if not impacts:
         return None
@@ -202,10 +218,20 @@ def rebuild_signal_snapshots(
         .where(Security.active.is_(True))
         .options(selectinload(Security.impacts).selectinload(EventSecurityImpact.event))
     ).all()
-    latest_ids = (
-        select(func.max(SecuritySignalSnapshot.id))
-        .group_by(SecuritySignalSnapshot.security_id, SecuritySignalSnapshot.horizon)
-        .scalar_subquery()
+    ordered_snapshots = select(
+        SecuritySignalSnapshot.id,
+        func.row_number()
+        .over(
+            partition_by=(
+                SecuritySignalSnapshot.security_id,
+                SecuritySignalSnapshot.horizon,
+            ),
+            order_by=(SecuritySignalSnapshot.as_of.desc(), SecuritySignalSnapshot.id.desc()),
+        )
+        .label("recency"),
+    ).subquery()
+    latest_ids = select(ordered_snapshots.c.id).where(
+        ordered_snapshots.c.recency == 1
     )
     latest = {
         (item.security_id, item.horizon): item
@@ -218,6 +244,19 @@ def rebuild_signal_snapshots(
         for horizon in HORIZONS:
             snapshot = aggregate_security(security, horizon, timestamp)
             previous = latest.get((security.id, horizon))
+            if snapshot is None and previous is not None:
+                snapshot = SecuritySignalSnapshot(
+                    security_id=security.id,
+                    as_of=timestamp,
+                    horizon=horizon,
+                    score=0.0,
+                    direction="neutral",
+                    confidence=0.0,
+                    conflict=0.0,
+                    rank=None,
+                    evidence_event_ids=[],
+                    components={"research_score": 0.0, "decision_score": 0.0, "events": []},
+                )
             if snapshot and (
                 previous is None or _snapshot_state(previous) != _snapshot_state(snapshot)
             ):

@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import OPPORTUNITY_ASSET_SYMBOLS
@@ -50,7 +50,8 @@ from .services.pe_analysis import (
 )
 from .services.providers import lookup_security_record
 from .services.research_quality import company_data_quality
-from .services.scoring import DIRECTION_SIGN
+from .services.scoring import DIRECTION_SIGN, event_is_available
+from .services.social_context import batch_social_context, collection_status
 
 api_router = APIRouter(prefix="/api/v1")
 web_router = APIRouter()
@@ -313,6 +314,8 @@ def _x_post_dict(post: XPost) -> dict[str, Any]:
         "external_links": post.external_links,
         "media": post.media,
         "public_metrics": post.public_metrics,
+        "is_truncated": bool((post.raw_data or {}).get("is_truncated")),
+        "collection_method": (post.raw_data or {}).get("collection_method", "browser"),
         "published_at": post.published_at,
         "fetched_at": post.fetched_at,
         "screening_status": post.screening_status,
@@ -325,18 +328,90 @@ def _x_post_dict(post: XPost) -> dict[str, Any]:
 def _latest_snapshot_map(
     session: Session, horizon: int, security_ids: set[int] | None = None
 ) -> dict[int, SecuritySignalSnapshot]:
-    query = (
-        select(SecuritySignalSnapshot)
-        .where(SecuritySignalSnapshot.horizon == horizon)
-        .order_by(SecuritySignalSnapshot.as_of.desc(), SecuritySignalSnapshot.id.desc())
+    return opportunity_service.latest_snapshot_map(session, horizon, security_ids)
+
+
+def _research_context(
+    session: Session,
+    request: Request,
+    securities: list[Security],
+    holdings: dict[int, str],
+    horizon: int = 5,
+) -> dict[int, dict[str, Any]]:
+    """Use the same current evidence and decision rules on every stock surface."""
+    if horizon not in VALID_HORIZONS:
+        raise HTTPException(status_code=422, detail="horizon 只能是 1、5 或 20")
+    ids = {security.id for security in securities}
+    if not ids:
+        return {}
+    now = datetime.now(UTC)
+    snapshots = {h: _latest_snapshot_map(session, h, ids) for h in sorted(VALID_HORIZONS)}
+    impacts = session.scalars(
+        select(EventSecurityImpact)
+        .where(
+            EventSecurityImpact.security_id.in_(ids),
+            EventSecurityImpact.is_current.is_(True),
+            EventSecurityImpact.status == "complete",
+        )
+        .options(selectinload(EventSecurityImpact.event))
+    ).all()
+    current = {
+        security_id: {
+            item.event_id: item for item in impacts
+            if item.security_id == security_id
+            and event_is_available(item.event, now)
+        }
+        for security_id in ids
+    }
+    settings = request.app.state.settings
+    social = batch_social_context(
+        session, sorted(ids), now=now, enabled=settings.x_browser_enabled,
+        stale_after_hours=settings.x_fetch_interval_hours * 2,
     )
-    if security_ids is not None:
-        if not security_ids:
-            return {}
-        query = query.where(SecuritySignalSnapshot.security_id.in_(security_ids))
-    result: dict[int, SecuritySignalSnapshot] = {}
-    for snapshot in session.scalars(query):
-        result.setdefault(snapshot.security_id, snapshot)
+    result = {}
+    for security in securities:
+        signals = {}
+        invalidated = []
+        for h in sorted(VALID_HORIZONS):
+            signal = _signal_dict(snapshots[h].get(security.id))
+            if signal and not set(signal["evidence_event_ids"] or []).issubset(
+                current[security.id]
+            ):
+                invalidated.append(h)
+                signal = None
+            signals[str(h)] = signal
+        pe = analysis_response(security, security.pe_analysis_profile, now=now)["summary"]
+        titles = {event_id: item.event.title for event_id, item in current[security.id].items()}
+        judgments = {
+            str(h): build_watchlist_judgment(
+                signals[str(h)], pe, titles,
+                holding_status=holdings.get(security.id, "unknown"),
+                signals_by_horizon=signals, social_context=social[security.id], now=now,
+            )
+            for h in sorted(VALID_HORIZONS)
+        }
+        selected = signals[str(horizon)]
+        evidence_ids = selected["evidence_event_ids"] if selected else []
+        result[security.id] = {
+            "holding_status": holdings.get(security.id, "unknown"),
+            "pe_analysis": pe,
+            "signals": signals,
+            "signal": selected,
+            "judgments": judgments,
+            "judgment": judgments[str(horizon)],
+            "social": social[security.id],
+            "invalidated_horizons": invalidated,
+            "event_checks": [
+                {
+                    "event_id": event_id, "title": current[security.id][event_id].event.title,
+                    "catalysts": current[security.id][event_id].catalysts,
+                    "risks": current[security.id][event_id].risks,
+                    "falsifiers": current[security.id][event_id].falsifiers,
+                    "missing_proof": current[security.id][event_id].event.missing_proof,
+                }
+                for event_id in evidence_ids
+            ],
+        }
     return result
 
 
@@ -647,23 +722,25 @@ def list_securities(
 
 
 @api_router.get("/securities/{security_id}")
-def get_security(security_id: int, request: Request) -> dict[str, Any]:
+def get_security(security_id: int, request: Request, horizon: int = 5) -> dict[str, Any]:
     with _session(request) as session:
         security = session.scalar(
             select(Security)
             .where(Security.id == security_id)
             .options(
                 selectinload(Security.impacts).selectinload(EventSecurityImpact.event),
-                selectinload(Security.snapshots),
                 selectinload(Security.watchlist_entry),
+                selectinload(Security.pe_analysis_profile),
             )
         )
         if security is None:
             raise HTTPException(status_code=404, detail="证券不存在")
-        latest = {
-            horizon: _latest_snapshot_map(session, horizon, {security.id}).get(security.id)
-            for horizon in VALID_HORIZONS
-        }
+        context = _research_context(
+            session, request, [security],
+            {security.id: security.watchlist_entry.holding_status}
+            if security.watchlist_entry else {},
+            horizon,
+        )[security.id]
         impacts = [item for item in security.impacts if item.is_current]
         impacts.sort(key=lambda item: item.event.occurred_at or item.created_at, reverse=True)
         return {
@@ -673,7 +750,7 @@ def get_security(security_id: int, request: Request) -> dict[str, Any]:
             "timezone": security.timezone,
             "calendar": security.calendar,
             "watchlisted": security.watchlist_entry is not None,
-            "signals": {str(key): _signal_dict(value) for key, value in latest.items()},
+            **context,
             "impacts": [
                 {**_impact_dict(item), "event_title": item.event.title}
                 for item in impacts
@@ -729,20 +806,33 @@ def refresh_pe_analysis(security_id: int, request: Request) -> dict[str, Any]:
 
 
 @api_router.get("/themes")
-def list_themes(request: Request) -> list[dict[str, Any]]:
+def list_themes(
+    request: Request, q: str | None = None, limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if limit is not None and not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit 只能是 1 至 500")
     with _session(request) as session:
-        themes = session.scalars(
-            select(Theme).options(selectinload(Theme.event_links)).order_by(Theme.name)
-        ).all()
+        query = (
+            select(Theme, func.count(EventTheme.event_id))
+            .outerjoin(EventTheme, EventTheme.theme_id == Theme.id)
+            .group_by(Theme.id).order_by(Theme.name)
+        )
+        if q:
+            query = query.where(
+                Theme.name.contains(q.strip(), autoescape=True)
+                | Theme.slug.contains(q.strip(), autoescape=True)
+            )
+        if limit is not None:
+            query = query.limit(limit)
         return [
             {
                 "id": item.id,
                 "slug": item.slug,
                 "name": item.name,
                 "description": item.description,
-                "event_count": len(item.event_links),
+                "event_count": event_count,
             }
-            for item in themes
+            for item, event_count in session.execute(query)
         ]
 
 
@@ -938,6 +1028,7 @@ def list_x_posts(
     screening_status: str | None = Query(default=None, max_length=20),
     classification: str | None = Query(default=None, max_length=20),
     limit: int = Query(default=100, ge=1, le=500),
+    post_id: int | None = None,
 ) -> list[dict[str, Any]]:
     with _session(request) as session:
         query = (
@@ -947,7 +1038,11 @@ def list_x_posts(
         )
         if account_id is not None:
             query = query.where(XPost.account_id == account_id)
-        if screening_status:
+        if post_id is not None:
+            query = query.where(XPost.id == post_id)
+        if screening_status in {"ignore", "ignored"}:
+            query = query.where(XPost.screening_status.in_(["ignore", "ignored"]))
+        elif screening_status:
             query = query.where(XPost.screening_status == screening_status)
         posts = session.scalars(query.limit(limit * 3)).all()
         if classification:
@@ -1014,7 +1109,7 @@ def metrics(
 
 
 @api_router.get("/watchlist")
-def get_watchlist(request: Request) -> list[dict[str, Any]]:
+def get_watchlist(request: Request, horizon: int = 5) -> list[dict[str, Any]]:
     with _session(request) as session:
         items = session.scalars(
             select(Watchlist)
@@ -1023,15 +1118,17 @@ def get_watchlist(request: Request) -> list[dict[str, Any]]:
             )
             .order_by(Watchlist.position, Watchlist.id)
         ).all()
+        context = _research_context(
+            session, request, [item.security for item in items],
+            {item.security_id: item.holding_status for item in items}, horizon,
+        )
         return [
             {
                 "security_id": item.security_id,
                 "active": item.active,
                 "position": item.position,
                 "security": _security_brief(item.security),
-                "pe_analysis": analysis_response(
-                    item.security, item.security.pe_analysis_profile
-                )["summary"],
+                **context[item.security_id],
             }
             for item in items
         ]
@@ -1047,6 +1144,12 @@ def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[
         security_ids = [security.id for security, _ in resolved]
         if len(security_ids) != len(set(security_ids)):
             raise HTTPException(status_code=422, detail="自选证券不能重复")
+        previous_holdings = {
+            security_id: holding_status
+            for security_id, holding_status in session.execute(
+                select(Watchlist.security_id, Watchlist.holding_status)
+            )
+        }
         session.execute(delete(Watchlist))
         session.add_all(
             [
@@ -1054,6 +1157,10 @@ def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[
                     security_id=security.id,
                     active=item.active,
                     position=position,
+                    holding_status=(
+                        item.holding_status if "holding_status" in item.model_fields_set
+                        else previous_holdings.get(security.id, "unknown")
+                    ),
                 )
                 for position, (security, item) in enumerate(resolved)
             ]
@@ -1120,32 +1227,10 @@ def dashboard(
     horizon: int = 5,
 ) -> HTMLResponse:
     opportunities = _dashboard_opportunities(request, market, theme, horizon)
-    watchlist = get_watchlist(request)
-    themes = list_themes(request)
+    watchlist = get_watchlist(request, horizon)
+    themes = list_themes(request, q=theme, limit=30)
     coverage = health(request)
     with _session(request) as session:
-        ids = {item["security_id"] for item in watchlist}
-        snapshots = _latest_snapshot_map(session, horizon, ids)
-        signals = {
-            security_id: _signal_dict(snapshot)
-            for security_id, snapshot in snapshots.items()
-        }
-        evidence_event_ids = {
-            int(event_id)
-            for signal in signals.values()
-            if signal is not None
-            for event_id in signal.get("evidence_event_ids") or []
-        }
-        event_titles: dict[int, str] = (
-            {
-                event_id: title
-                for event_id, title in session.execute(
-                    select(Event.id, Event.title).where(Event.id.in_(evidence_event_ids))
-                )
-            }
-            if evidence_event_ids
-            else {}
-        )
         macro_row = session.execute(
             select(Event.id, Article.title, Article.summary, Article.published_at)
             .join(EventArticle, EventArticle.event_id == Event.id)
@@ -1170,16 +1255,8 @@ def dashboard(
         )
         watchlist_rows = []
         for item in watchlist:
-            signal = signals.get(item["security_id"])
-            watchlist_rows.append(
-                {
-                    **item,
-                    "signal": signal,
-                    "judgment": build_watchlist_judgment(
-                        signal, item["pe_analysis"], event_titles, macro_context
-                    ),
-                }
-            )
+            item["judgment"]["macro"] = macro_context
+            watchlist_rows.append(item)
         events = session.scalars(
             _event_query().order_by(Event.occurred_at.desc(), Event.id.desc()).limit(12)
         ).unique().all()
@@ -1220,13 +1297,14 @@ def opportunity_page(
 
 
 @web_router.get("/securities/{security_id}", response_class=HTMLResponse)
-def security_page(security_id: int, request: Request) -> HTMLResponse:
-    security = get_security(security_id, request)
+def security_page(security_id: int, request: Request, horizon: int = 5) -> HTMLResponse:
+    security = get_security(security_id, request, horizon)
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="security.html",
         context={
             "security": security,
+            "horizon": horizon,
             "pe_analysis": get_pe_analysis(security_id, request)
             if security["watchlisted"]
             else None,
@@ -1279,23 +1357,38 @@ def watchlist_page(request: Request) -> HTMLResponse:
 @web_router.get("/x", response_class=HTMLResponse)
 def x_posts_page(
     request: Request,
-    account_id: int | None = None,
+    account_id: str | None = None,
     screening_status: str | None = None,
+    post_id: int | None = None,
 ) -> HTMLResponse:
+    try:
+        selected_account = int(account_id) if account_id else None
+        if selected_account is not None and selected_account < 1:
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="account_id 必须为正整数或留空") from exc
+    settings = request.app.state.settings
+    with _session(request) as session:
+        collection = collection_status(
+            session, datetime.now(UTC), enabled=settings.x_browser_enabled,
+            stale_after_hours=settings.x_fetch_interval_hours * 2,
+        )
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="x_posts.html",
         context={
             "posts": list_x_posts(
                 request,
-                account_id=account_id,
+                account_id=selected_account,
                 screening_status=screening_status,
                 classification=None,
                 limit=200,
+                post_id=post_id,
             ),
             "accounts": list_x_accounts(request),
-            "selected_account_id": account_id,
+            "selected_account_id": selected_account,
             "selected_status": screening_status,
+            "collection": collection,
         },
     )
 

@@ -8,6 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, getproxies
 
 from openai import OpenAI
 from pydantic import ValidationError
@@ -93,6 +96,12 @@ class XFetcher(Protocol):
     def fetch(self, handle: str) -> list[BrowserPost]: ...
 
 
+class XBrowserError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 class PlaywrightXFetcher:
     """Use one dedicated persistent Chrome profile and collect while scrolling."""
 
@@ -110,12 +119,14 @@ class PlaywrightXFetcher:
         return sync_playwright
 
     def _context(self, playwright: Any, *, headless: bool) -> Any:
+        proxy = self._proxy()
         try:
             return playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self.settings.x_browser_profile_path),
                 channel="chrome",
                 headless=headless,
                 viewport={"width": 1280, "height": 1000},
+                **({"proxy": proxy} if proxy else {}),
             )
         except Exception as exc:
             message = str(exc).casefold()
@@ -123,7 +134,40 @@ class PlaywrightXFetcher:
                 raise RuntimeError(
                     "未找到正式 Google Chrome；请先从 google.com/chrome 安装"
                 ) from exc
-            raise
+            raise XBrowserError(
+                "browser", "X 浏览器启动失败；请先关闭使用同一专用配置的登录或采集窗口"
+            ) from None
+
+    def _proxy(self) -> dict[str, str] | None:
+        configured = self.settings.x_browser_proxy_url
+        proxies = getproxies() if configured is None else {}
+        value = configured.get_secret_value() if configured else (
+            proxies.get("https") or proxies.get("http") or proxies.get("all")
+        )
+        if not value:
+            return None
+        try:
+            parsed = urlsplit(value if "://" in value else f"http://{value}")
+            if (
+                parsed.scheme not in {"http", "https", "socks5"}
+                or not parsed.hostname or parsed.path not in {"", "/"}
+                or parsed.query or parsed.fragment
+            ):
+                raise ValueError
+            host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            server = f"{parsed.scheme}://{host}"
+            if parsed.port is not None:
+                server += f":{parsed.port}"
+            result = {"server": server}
+            if parsed.username is not None:
+                result["username"] = unquote(parsed.username)
+            if parsed.password is not None:
+                result["password"] = unquote(parsed.password)
+            return result
+        except ValueError:
+            raise XBrowserError(
+                "proxy", "X 代理配置无效，请检查 X_BROWSER_PROXY_URL 或系统代理"
+            ) from None
 
     def login(self) -> None:
         sync_playwright = self._playwright()
@@ -137,76 +181,165 @@ class PlaywrightXFetcher:
     def fetch(self, handle: str) -> list[BrowserPost]:
         sync_playwright = self._playwright()
         with sync_playwright() as playwright:
-            context = self._context(playwright, headless=True)
+            context = self._context(playwright, headless=self.settings.x_browser_headless)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 profile_url = f"https://x.com/{handle}"
                 last_error: Exception | None = None
                 for _attempt in range(2):
                     try:
-                        page.goto(
+                        response = page.goto(
                             profile_url,
                             wait_until="domcontentloaded",
                             timeout=60_000,
                         )
+                        if response is not None and response.status >= 400:
+                            raise XBrowserError(
+                                "http", f"X 页面返回 HTTP {response.status}；"
+                                "请检查代理连通性和账号访问状态"
+                            )
                         page.wait_for_timeout(5_000)
-                        if "/i/flow/login" in page.url:
-                            raise RuntimeError("X 登录已失效，请运行 trade-news x-login")
+                        if any(path in page.url for path in ("/i/flow/login", "/login")):
+                            raise XBrowserError(
+                                "auth", "X 登录已失效，请运行 uv run trade-news x-login"
+                            )
                         page.wait_for_selector(
-                            'article[data-testid="tweet"]', timeout=20_000
+                            'article', timeout=20_000
                         )
                         last_error = None
                         break
                     except Exception as exc:
                         last_error = exc
+                        if isinstance(exc, XBrowserError) and exc.code == "auth":
+                            raise
                         page.wait_for_timeout(5_000)
                 if last_error is not None:
-                    raise RuntimeError(f"X 页面加载失败：{last_error}") from last_error
-                payloads = page.evaluate(
-                    _SCROLL_AND_COLLECT_SCRIPT,
-                    {
-                        "handle": handle,
-                        "lookbackMs": self.settings.x_lookback_hours * 60 * 60 * 1000,
-                        "maxScrolls": 8,
-                    },
-                )
+                    if isinstance(last_error, XBrowserError):
+                        raise last_error
+                    error_code = re.search(r"net::[A-Z_]+", str(last_error))
+                    if error_code:
+                        raise XBrowserError(
+                            "network", f"X 网络请求失败（{error_code[0]}）；"
+                            "请检查系统代理，或通过 X_BROWSER_PROXY_URL 显式指定代理"
+                        ) from None
+                    raise XBrowserError(
+                        "page", "X 帖子列表未能加载；请检查登录状态、账号可见性或页面结构变化"
+                    ) from None
+                try:
+                    payloads = page.evaluate(
+                        _SCROLL_AND_COLLECT_SCRIPT,
+                        {
+                            "handle": handle,
+                            "lookbackMs": self.settings.x_lookback_hours * 60 * 60 * 1000,
+                            "maxScrolls": 8,
+                        },
+                    )
+                except Exception:
+                    raise XBrowserError(
+                        "parse", "X 浏览器帖子解析失败，页面结构可能已变化"
+                    ) from None
             finally:
                 context.close()
+        if not isinstance(payloads, list):
+            raise XBrowserError("parse", "X 页面解析结果异常，未记为成功采集")
         result = []
-        for payload in payloads if isinstance(payloads, list) else []:
+        for payload in payloads:
             if isinstance(payload, dict) and (item := BrowserPost.from_payload(payload)):
                 result.append(item)
+        if payloads and not result:
+            raise XBrowserError("parse", "X 帖子字段无法解析，未记为成功采集")
         return result
 
 
 _SCROLL_AND_COLLECT_SCRIPT = r"""
 async ({handle, lookbackMs, maxScrolls}) => {
   const collected = new Map();
-  const cutoff = Date.now() - lookbackMs;
+  const now = Date.now();
+  const cutoff = now - lookbackMs;
   const normalizedHandle = handle.toLowerCase();
+  const statusMatch = (anchor) => {
+    if (!anchor) return null;
+    try {
+      const url = new URL(anchor.href);
+      const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)$/);
+      if (!['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'].includes(url.hostname)
+          || !match || match[1].toLowerCase() === 'i') return null;
+      return match;
+    } catch (_error) { return null; }
+  };
+  const ownNodes = (article, selector) => Array.from(article.querySelectorAll(selector))
+    .filter((node) => node.closest('article') === article);
+  const statusAnchorFor = (article) => {
+    const time = ownNodes(article, 'time').find((node) =>
+      statusMatch(node.closest('a[href*="/status/"]')));
+    return (time && time.closest('a[href*="/status/"]'))
+      || ownNodes(article, 'a[href*="/status/"]').find(statusMatch);
+  };
+  const textNodesFor = (article) => {
+    for (const selector of [
+      '[data-testid="tweetText"]',
+      'div.whitespace-pre-wrap.text-text',
+      'div.whitespace-pre-wrap'
+    ]) {
+      const nodes = ownNodes(article, selector).filter((node) => {
+        const text = (node.innerText || node.textContent || '').trim();
+        return text && !/^(Pinned|已置顶|置顶)$/.test(text)
+          && !node.closest('[data-testid="User-Name"]');
+      });
+      if (nodes.length) return nodes;
+    }
+    return [];
+  };
+  const textFor = (node) => {
+    if (!node) return {text: '', truncated: false};
+    const clone = node.cloneNode(true);
+    let truncated = Array.from(node.classList).some((name) => name.includes('mask-image')
+      || name.startsWith('mask-'));
+    clone.querySelectorAll('button, [role="button"]').forEach((button) => {
+      if (/^(Show more|Read more|显示更多|展开|查看更多)$/i.test(button.textContent.trim())) {
+        truncated = true;
+        button.remove();
+      }
+    });
+    clone.querySelectorAll('br').forEach((lineBreak) => lineBreak.replaceWith('\n'));
+    return {text: (clone.textContent || '').trim(), truncated};
+  };
+  const publishedAtFor = (article, statusAnchor, postId) => {
+    const time = statusAnchor.querySelector('time') || ownNodes(article, 'time')[0];
+    let timestamp = time ? Date.parse(time.getAttribute('datetime') || '') : NaN;
+    if (!Number.isFinite(timestamp)) {
+      try {
+        const id = BigInt(postId);
+        if (id <= 0n || id >= (1n << 63n)) return null;
+        timestamp = Number((id >> 22n) + 1288834974657n);
+      } catch (_error) { return null; }
+    }
+    if (timestamp < cutoff || timestamp > now + 300000) return null;
+    return new Date(timestamp).toISOString();
+  };
   const collect = () => {
-    document.querySelectorAll('article[data-testid="tweet"]').forEach((article) => {
-      const time = article.querySelector('time');
-      const statusAnchor = time ? time.closest('a[href*="/status/"]') : null;
-      if (!time || !statusAnchor) return;
-      const publishedAt = time.getAttribute('datetime');
-      if (!publishedAt || Date.parse(publishedAt) < cutoff) return;
-      const match = new URL(statusAnchor.href).pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+    document.querySelectorAll('article').forEach((article) => {
+      if (article.parentElement && article.parentElement.closest('article')) return;
+      const statusAnchor = statusAnchorFor(article);
+      const match = statusMatch(statusAnchor);
       if (!match) return;
       const authorHandle = match[1];
       const postId = match[2];
-      const allStatusAnchors = Array.from(article.querySelectorAll('a[href*="/status/"]'));
-      const quotedAnchor = allStatusAnchors.find((anchor) => {
-        const nested = new URL(anchor.href).pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+      const publishedAt = publishedAtFor(article, statusAnchor, postId);
+      if (!publishedAt) return;
+      const quoteArticle = article.querySelector('article');
+      const quotedAnchor = (quoteArticle && statusAnchorFor(quoteArticle))
+        || ownNodes(article, 'a[href*="/status/"]').find((anchor) => {
+        const nested = statusMatch(anchor);
         return nested && nested[2] !== postId;
       });
-      const quoteMatch = quotedAnchor
-        ? new URL(quotedAnchor.href).pathname.match(/^\/([^/]+)\/status\/(\d+)/)
-        : null;
-      const textElements = Array.from(article.querySelectorAll('[data-testid="tweetText"]'));
-      const text = textElements[0] ? textElements[0].innerText : '';
-      const quotedText = textElements[1] ? textElements[1].innerText : '';
-      const body = article.innerText || '';
+      const quoteMatch = statusMatch(quotedAnchor);
+      const textElements = textNodesFor(article);
+      const mainText = textFor(textElements[0]);
+      const quoteText = textFor(quoteArticle ? textNodesFor(quoteArticle)[0] : textElements[1]);
+      const ownArticle = article.cloneNode(true);
+      ownArticle.querySelectorAll('article').forEach((nested) => nested.remove());
+      const body = ownArticle.textContent || '';
       let postType = 'original';
       if (authorHandle.toLowerCase() !== normalizedHandle) postType = 'repost';
       else if (quoteMatch) postType = 'quote';
@@ -232,11 +365,15 @@ async ({handle, lookbackMs, maxScrolls}) => {
       collected.set(postId, {
         url: statusAnchor.href,
         post_type: postType,
-        text,
+        text: mainText.text,
         published_at: publishedAt,
         quoted_post_id: quoteMatch ? quoteMatch[2] : null,
         quoted_author_handle: quoteMatch ? quoteMatch[1] : null,
-        quoted_text: quotedText,
+        quoted_text: quoteText.text,
+        is_truncated: mainText.truncated || quoteText.truncated
+          || Boolean(article.querySelector('a[href*="/superfollows/subscribe"]')),
+        collection_method: article.getAttribute('data-testid') === 'tweet'
+          ? 'browser' : 'public_profile',
         external_links: Array.from(new Set(externalLinks)),
         media,
         public_metrics: {
@@ -256,6 +393,122 @@ async ({handle, lookbackMs, maxScrolls}) => {
   return Array.from(collected.values());
 }
 """
+
+
+class _XRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Any:
+        destination = urlsplit(newurl)
+        if destination.scheme != "https" or destination.hostname not in {
+            "x.com", "www.x.com", "twitter.com", "www.twitter.com"
+        }:
+            raise XBrowserError("http", "X 公开页面发生非预期跳转，未继续采集")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class PublicProfileXFetcher:
+    """Read only posts present in the public profile HTML, with no login cookies."""
+
+    coverage = "public_page"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def fetch(self, handle: str) -> list[BrowserPost]:
+        from .x_html import parse_public_profile
+
+        if re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle) is None:
+            raise XBrowserError("account", "X 账号格式无效")
+        proxy = PlaywrightXFetcher(self.settings)._proxy()
+        proxy_url = ""
+        if proxy:
+            server = urlsplit(proxy["server"])
+            if server.scheme == "socks5":
+                raise XBrowserError(
+                    "proxy", "X 公开页面采集需要 HTTP/HTTPS 代理，请使用浏览器模式或调整代理"
+                )
+            credentials = ""
+            if "username" in proxy:
+                credentials = quote(proxy["username"], safe="")
+                if "password" in proxy:
+                    credentials += ":" + quote(proxy["password"], safe="")
+                credentials += "@"
+            proxy_url = f"{server.scheme}://{credentials}{server.netloc}"
+        opener = build_opener(
+            ProxyHandler({"https": proxy_url} if proxy_url else {}), _XRedirectHandler()
+        )
+        try:
+            with opener.open(
+                Request(f"https://x.com/{handle}", headers={"Accept": "text/html"}),
+                timeout=self.settings.request_timeout_seconds,
+            ) as response:
+                if response.headers.get_content_type() != "text/html":
+                    raise XBrowserError("parse", "X 公开页面未返回 HTML，未记为成功采集")
+                body = response.read(5_000_001)
+                if len(body) > 5_000_000:
+                    raise XBrowserError("parse", "X 公开页面超出大小限制，未记为成功采集")
+                html = body.decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            raise XBrowserError("http", f"X 公开页面返回 HTTP {exc.code}") from None
+        except (URLError, TimeoutError, OSError):
+            raise XBrowserError("network", "X 公开页面请求失败，请检查代理连通性") from None
+        try:
+            payloads = parse_public_profile(html, handle)
+        except ValueError:
+            raise XBrowserError(
+                "parse", "X 公开页面没有可解析帖子；账号可能受限或需要登录，请尝试浏览器模式"
+            ) from None
+        posts = [item for payload in payloads if (item := BrowserPost.from_payload(payload))]
+        if not posts:
+            raise XBrowserError("parse", "X 公开页面帖子字段无效，未记为成功采集")
+        return posts
+
+
+class ResilientXFetcher:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.browser = PlaywrightXFetcher(settings)
+        self.public = PublicProfileXFetcher(settings)
+        self.coverage = "curated"
+        self._browser_unavailable = False
+
+    def begin_run(self) -> None:
+        self._browser_unavailable = False
+
+    def fetch(self, handle: str) -> list[BrowserPost]:
+        self.coverage = "curated"
+        if self.settings.x_fetch_mode == "public":
+            self.coverage = "public_page"
+            return self.public.fetch(handle)
+        if self.settings.x_fetch_mode == "browser":
+            return self._fetch_browser(handle)
+        browser_error: RuntimeError | None = None
+        if not self._browser_unavailable:
+            try:
+                return self._fetch_browser(handle)
+            except RuntimeError as exc:
+                browser_error = exc
+                if not isinstance(exc, XBrowserError) or exc.code in {
+                    "network", "browser", "auth", "proxy"
+                }:
+                    # Retry the browser on the next run, not for every account this run.
+                    self._browser_unavailable = True
+        self.coverage = "public_page"
+        try:
+            return self.public.fetch(handle)
+        except XBrowserError as exc:
+            if browser_error is not None:
+                raise XBrowserError(
+                    exc.code, f"浏览器采集：{browser_error}；公开页面采集：{exc}"
+                ) from None
+            raise
+
+    def _fetch_browser(self, handle: str) -> list[BrowserPost]:
+        posts = self.browser.fetch(handle)
+        if any(post.raw_data.get("collection_method") == "public_profile" for post in posts):
+            self.coverage = "public_page"
+        return posts
 
 
 ScreeningCompletion = Callable[[str, str], str]
@@ -293,6 +546,10 @@ class XPostScreener:
 
     def screen(self, post: XPost, account: XAccount) -> XPostScreeningPayload:
         schema = json.dumps(XPostScreeningPayload.model_json_schema(), ensure_ascii=False)
+        completeness = (
+            "页面仅提供截断摘要，不得推测省略部分"
+            if (post.raw_data or {}).get("is_truncated") else "页面可见正文"
+        )
         prompt = f"""分类以下 X 帖子。作者类型只是来源背景，不代表内容真实。
 
 作者：@{account.handle}
@@ -301,6 +558,7 @@ class XPostScreener:
 引用作者：{post.quoted_author_handle or "无"}
 引用内容：{post.quoted_text or "无"}
 外链：{json.dumps(post.external_links, ensure_ascii=False)}
+正文完整性：{completeness}
 
 要求：
 1. 只有帖子明确陈述已经发生、可核实的事件时才分类为 fact。
@@ -338,7 +596,7 @@ class XIngestionService:
         self.session_factory = session_factory
         self.settings = settings
         self.ingestion = ingestion
-        self.fetcher = fetcher or PlaywrightXFetcher(settings)
+        self.fetcher = fetcher or ResilientXFetcher(settings)
         self.screener = screener or XPostScreener(settings)
 
     @staticmethod
@@ -359,6 +617,15 @@ class XIngestionService:
     def _upsert_post(session: Session, account: XAccount, item: BrowserPost) -> tuple[XPost, bool]:
         post = session.scalar(select(XPost).where(XPost.post_id == item.post_id))
         created = post is None
+        if post is not None:
+            was_truncated = bool((post.raw_data or {}).get("is_truncated"))
+            is_truncated = bool(item.raw_data.get("is_truncated"))
+            if is_truncated and not was_truncated and (post.text or post.quoted_text):
+                # A public-page fallback must not replace a previously captured full post.
+                post.fetched_at = utc_now()
+                return post, False
+            if was_truncated and not is_truncated and post.screening_status == "review":
+                post.screening = {}
         if post is None:
             post = XPost(
                 account_id=account.id,
@@ -509,6 +776,12 @@ class XIngestionService:
             post.screening = {"error": f"{type(exc).__name__}: {exc}"[:1000]}
             return None
         post.screening = payload.model_dump()
+        if (post.raw_data or {}).get("is_truncated"):
+            post.screening_status = "review"
+            post.screening["verification_needs"] = list(dict.fromkeys([
+                *post.screening.get("verification_needs", []), "打开原帖核对完整正文"
+            ]))
+            return None
         actionable = (
             payload.classification == "fact"
             and payload.market_relevance >= 3
@@ -537,6 +810,9 @@ class XIngestionService:
 
     def execute(self) -> set[int]:
         queued_events: set[int] = set()
+        failed_accounts = 0
+        if isinstance(self.fetcher, ResilientXFetcher):
+            self.fetcher.begin_run()
         cutoff = datetime.now(UTC) - timedelta(hours=self.settings.x_lookback_hours)
         with self.session_factory() as session:
             accounts = session.scalars(
@@ -544,7 +820,10 @@ class XIngestionService:
                 .where(XAccount.active.is_(True))
                 .order_by(XAccount.priority, XAccount.id)
             ).all()
+            if not accounts:
+                raise RuntimeError("X 采集未运行：没有启用的博主账号，请先在博主配置中启用账号。")
             for account in accounts:
+                account_events: set[int] = set()
                 health = self._health(session, account)
                 health.last_attempt_at = utc_now()
                 try:
@@ -557,13 +836,22 @@ class XIngestionService:
                     ]
                     for item in accepted:
                         post, created = self._upsert_post(session, account, item)
-                        if created and (event_id := self._screen_new_post(session, post, account)):
-                            queued_events.add(event_id)
+                        needs_screening = created or (
+                            post.screening_status in {"pending", "review"}
+                            and (not post.screening or "error" in post.screening)
+                        )
+                        if needs_screening and (
+                            event_id := self._screen_new_post(session, post, account)
+                        ):
+                            account_events.add(event_id)
                     health.last_success_at = utc_now()
+                    health.coverage = getattr(self.fetcher, "coverage", "curated")
                     health.last_error = None
                     health.consecutive_failures = 0
                     health.items_last_run = len(accepted)
                 except Exception as exc:
+                    failed_accounts += 1
+                    account_events.clear()
                     session.rollback()
                     health = self._health(session, account)
                     health.last_attempt_at = utc_now()
@@ -571,6 +859,12 @@ class XIngestionService:
                     health.consecutive_failures = (health.consecutive_failures or 0) + 1
                     health.items_last_run = 0
                 session.commit()
+                queued_events.update(account_events)
+        if failed_accounts == len(accounts):
+            raise RuntimeError(
+                f"X 采集失败：{failed_accounts}/{len(accounts)} 个账号失败；"
+                "请查看运行状态中的错误原因。"
+            )
         return queued_events
 
     def apply_decision(

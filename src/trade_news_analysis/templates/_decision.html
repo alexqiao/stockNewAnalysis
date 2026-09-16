@@ -1,0 +1,53 @@
+{% macro decision(judgment, security_id, signal, pe, compact=false) %}
+{% set action = judgment.action %}
+<div class="action-verdict {{ action.code }}">
+  <span>当前行动 · {{ {"unknown": "持仓未填写", "flat": "未持仓", "long": "已持仓"}[action.holding_status] }}</span>
+  <strong>{{ action.label }}</strong>
+  <p>{{ action.reason }}</p>
+</div>
+{% if action.holding_status == 'unknown' %}
+<div class="decision-scenarios"><span>未持仓：<strong>{{ action.flat_action.label }}</strong></span><span>已持仓：<strong>{{ action.long_action.label }}</strong></span></div>
+<a href="/watchlist">填写持仓状态 →</a>
+{% if action.flat_action.blockers %}<p class="muted"><strong>买入还需解决：</strong>{{ (action.flat_action.blockers[:2] if compact else action.flat_action.blockers)|join('；') }}</p>{% endif %}
+{% if not compact %}<p class="muted"><strong>持仓情景：</strong>{{ action.long_action.reason }}{% if action.long_action.blockers %} {{ action.long_action.blockers|join('；') }}{% endif %}</p>{% endif %}
+{% endif %}
+{% if action.blockers %}<div class="decision-blockers"><strong>尚未满足</strong><ul>{% for reason in (action.blockers[:3] if compact else action.blockers) %}<li>{{ reason }}</li>{% endfor %}</ul></div>{% endif %}
+{% if not compact %}
+<div class="decision-conditions">
+  <div><h3>买入前确认</h3><ul>{% for condition in action.entry_conditions %}<li>{{ condition }}</li>{% endfor %}</ul></div>
+  <div><h3>持有 / 退出条件</h3><ul>{% for condition in action.exit_conditions %}<li>{{ condition }}</li>{% endfor %}</ul></div>
+</div>
+{% if action.next_steps %}<h3>下一步</h3><ul>{% for step in action.next_steps %}<li>{{ step }}</li>{% endfor %}</ul>{% endif %}
+<p class="muted">{{ action.policy_note }}</p>
+{% endif %}
+<p class="decision-times muted">信号：{{ signal.as_of if signal else '暂无' }} · 价格确认：{{ pe.price_as_of or '待刷新' }}</p>
+<details class="research-details"><summary>查看新闻证据与 PE 假设</summary>
+  <p><strong>原始研究合成：</strong>{{ judgment.label }}</p><p>{{ judgment.summary }}</p>
+  {% if judgment.key_events %}<p><strong>主要事件：</strong>{{ judgment.key_events|join("；") }}</p>{% endif %}
+  <a href="/securities/{{ security_id }}#pe-analysis">核对估值输入 →</a>
+</details>
+{% endmacro %}
+
+{% macro social_context(social, compact=false) %}
+<div class="social-context">
+  <h3>X 博主线索</h3>
+  <p>{{ social.label }} · {{ social.post_count }} 篇相关帖子 / {{ social.author_count }} 位作者</p>
+  <p class="muted">{{ social.summary }}</p>
+  {% if not compact %}
+  {% if social.collection.gaps %}<div class="notice">{{ social.collection.gaps|join('；') }}。<a href="/status">检查运行状态</a> · <a href="/x/accounts">配置博主</a></div>{% endif %}
+  {% for conflict in social.conflicts %}<p class="notice">{{ conflict }}</p>{% endfor %}
+  {% endif %}
+  {% if compact %}{% for post in social.posts[:2] %}
+  <p><a href="{{ post.url }}" target="_blank" rel="noopener noreferrer">@{{ post.author }}</a> · {{ post.relation_label }}<br>{{ post.summary[:160] }}</p>
+  {% endfor %}{% else %}
+  {% for post in social.posts %}<article class="social-context-post">
+    <div class="meta"><a href="{{ post.url }}" target="_blank" rel="noopener noreferrer">@{{ post.author }} · 查看原帖 ↗</a><time>{{ post.published_at }}</time></div>
+    <p>{{ post.summary }}</p><p class="muted">{{ post.relation_label }} · {{ post.classification }} · {{ post.screening_status }}</p>
+    {% if post.verification_needs %}<p><strong>待核实：</strong>{{ post.verification_needs|join('；') }}</p>{% endif %}
+    <a href="/x?post_id={{ post.id }}#post-{{ post.id }}">查看筛选与审核 →</a>
+    {% if post.related_event_id %} · <a href="/events/{{ post.related_event_id }}">关联事件</a>{% endif %}
+  </article>{% else %}<p class="muted">当前窗口内没有关联帖子；采集不完整时不能解释为博主没有观点。</p>{% endfor %}
+  {% endif %}
+  <a href="/x">打开博主动态 →</a>
+</div>
+{% endmacro %}

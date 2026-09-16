@@ -2539,6 +2539,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "apscheduler" },
+    { name = "beautifulsoup4" },
     { name = "fastapi" },
     { name = "feedparser" },
     { name = "investormate" },
@@ -2573,6 +2574,7 @@ requires-dist = [
     { name = "akshare", marker = "extra == 'data'", specifier = ">=1.17,<2" },
     { name = "alembic", specifier = ">=1.16,<2" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
+    { name = "beautifulsoup4", specifier = ">=4.13,<5" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "feedparser", specifier = ">=6.0.11,<7" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<1" },

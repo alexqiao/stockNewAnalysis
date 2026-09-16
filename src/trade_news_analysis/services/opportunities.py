@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urlencode
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import (
@@ -59,19 +59,33 @@ def security_brief(security: Security) -> dict[str, Any]:
 def latest_snapshot_map(
     session: Session, horizon: int, security_ids: set[int] | None = None
 ) -> dict[int, SecuritySignalSnapshot]:
-    query = (
-        select(SecuritySignalSnapshot)
+    if security_ids is not None and not security_ids:
+        return {}
+    ranked_query = (
+        select(
+            SecuritySignalSnapshot.id,
+            func.row_number()
+            .over(
+                partition_by=SecuritySignalSnapshot.security_id,
+                order_by=(
+                    SecuritySignalSnapshot.as_of.desc(),
+                    SecuritySignalSnapshot.id.desc(),
+                ),
+            )
+            .label("recency"),
+        )
         .where(SecuritySignalSnapshot.horizon == horizon)
-        .order_by(SecuritySignalSnapshot.as_of.desc(), SecuritySignalSnapshot.id.desc())
     )
     if security_ids is not None:
-        if not security_ids:
-            return {}
-        query = query.where(SecuritySignalSnapshot.security_id.in_(security_ids))
-    result: dict[int, SecuritySignalSnapshot] = {}
-    for snapshot in session.scalars(query):
-        result.setdefault(snapshot.security_id, snapshot)
-    return result
+        ranked_query = ranked_query.where(SecuritySignalSnapshot.security_id.in_(security_ids))
+    ordered_snapshots = ranked_query.subquery()
+    query = (
+        select(SecuritySignalSnapshot)
+        .join(ordered_snapshots, SecuritySignalSnapshot.id == ordered_snapshots.c.id)
+        .where(ordered_snapshots.c.recency == 1)
+        .order_by(SecuritySignalSnapshot.as_of.desc(), SecuritySignalSnapshot.id.desc())
+    )
+    return {snapshot.security_id: snapshot for snapshot in session.scalars(query)}
 
 
 def signal_dict(snapshot: SecuritySignalSnapshot | None) -> dict[str, Any] | None:

@@ -13,6 +13,7 @@ authors = [{ name = "tradeNewsAnalysis contributors" }]
 dependencies = [
   "alembic>=1.16,<2",
   "apscheduler>=3.11,<4",
+  "beautifulsoup4>=4.13,<5",
   "fastapi>=0.116,<1",
   "feedparser>=6.0.11,<7",
   "investormate==0.6.0",

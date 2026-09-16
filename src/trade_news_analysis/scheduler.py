@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -34,7 +35,14 @@ def start_scheduler(settings: Settings, coordinator: PipelineCoordinator) -> Bac
         try:
             coordinator.submit_x_ingestion()
         except PipelineBusyError:
-            logger.info("Skipping scheduled X ingestion because the pipeline is active")
+            logger.info("Pipeline is active; retrying scheduled X ingestion in one minute")
+            scheduler.add_job(
+                scheduled_x_ingestion,
+                "date",
+                run_date=datetime.now(UTC) + timedelta(minutes=1),
+                id="x-post-ingestion-retry",
+                replace_existing=True,
+            )
 
     scheduler.add_job(
         scheduled_pipeline,

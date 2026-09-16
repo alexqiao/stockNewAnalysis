@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     ingest_interval_minutes: int = Field(default=30, ge=5, le=1440)
     x_browser_enabled: bool = False
+    x_fetch_mode: Literal["auto", "browser", "public"] = "auto"
+    x_browser_proxy_url: SecretStr | None = None
+    x_browser_headless: bool = True
     x_fetch_interval_hours: int = Field(default=6, ge=1, le=24)
     x_lookback_hours: int = Field(default=24, ge=6, le=168)
     x_browser_profile_path: Path = Path("./data/x-browser-profile")

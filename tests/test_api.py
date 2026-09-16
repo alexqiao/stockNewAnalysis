@@ -40,7 +40,7 @@ class APIFakeSource:
                     title="Apple reports paid enterprise adoption",
                     summary="Enterprise customers started paying.",
                     url="https://example.com/api-story",
-                    published_at=datetime(2026, 8, 20, 12, tzinfo=UTC),
+                    published_at=datetime.now(UTC),
                 )
             ],
         )
@@ -452,7 +452,7 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
         assert "暂不计入个股方向" in dashboard.text
         assert "查看新闻证据与 PE 假设" in dashboard.text
         opportunity_section = dashboard.text.split("跨市场机会榜", 1)[1].split(
-            "自选股当前研判", 1
+            "最近事件", 1
         )[0]
         assert "企业软件" in opportunity_section
         assert "Apple Inc." not in opportunity_section

@@ -1,20 +1,39 @@
 {% extends "base.html" %}
+{% from "_decision.html" import decision, social_context %}
 {% block title %}{{ security.name }} · 股票事件研究{% endblock %}
 {% block content %}
 <section class="page-heading">
   <p class="eyebrow">{{ security.market }} · {{ security.exchange }} · {{ security.symbol }}</p>
   <h1>{{ security.name }}</h1>
-  <p class="lead">{{ security.business_summary or "暂无可靠业务简介；相关弹性评分会因此更保守。" }}</p>
+  <details><summary>公司业务与资料完整度</summary>
+  <p>{{ security.business_summary or "暂无可靠业务简介；相关弹性评分会因此更保守。" }}</p>
   <p class="muted">资料完整度 {{ "%.0f"|format(security.data_quality * 100) }}%{% if security.data_gaps %} · 待补：{{ security.data_gaps|join("、") }}{% endif %}</p>
+  </details>
+</section>
+<section class="analysis-panel" id="decision">
+  <div class="panel-heading"><h2>{{ horizon }} 日行动判断</h2><a href="/watchlist">更新持仓</a></div>
+  {{ decision(security.judgment, security.id, security.signal, security.pe_analysis) }}
+  {% if security.invalidated_horizons %}<p class="notice">{{ security.invalidated_horizons|join('、') }} 日原信号包含已撤销证据，已暂停使用，请重新分析。</p>{% endif %}
 </section>
 <div class="horizon-grid">
 {% for horizon in [1, 5, 20] %}{% set signal = security.signals[horizon|string] %}
   <div class="horizon {{ signal.direction if signal else 'neutral' }}">
     <strong>{{ horizon }} 个交易日</strong>
+    <a href="/securities/{{ security.id }}?horizon={{ horizon }}"><strong>{{ security.judgments[horizon|string].action.label }}</strong></a>
     {% if signal %}<span>{{ signal.direction }} · 决策分 {{ "%.1f"|format(signal.decision_score) }}</span><p>研究分 {{ "%.1f"|format(signal.research_score) }} · 置信度 {{ "%.0f"|format(signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(signal.conflict * 100) }}%</p>{% else %}<span>尚无信号</span>{% endif %}
   </div>
 {% endfor %}
 </div>
+<section class="analysis-panel"><h2>需要验证的事件条件</h2>
+{% for check in security.event_checks %}<article class="social-context-post">
+  <h3><a href="/events/{{ check.event_id }}">{{ check.title }}</a></h3>
+  <p><strong>催化兑现：</strong>{{ check.catalysts|join('；') or '尚未提供具体催化，需补充' }}</p>
+  <p><strong>判断失效：</strong>{{ check.falsifiers|join('；') or '尚未提供可检验条件，需补充' }}</p>
+  {% if check.risks %}<p><strong>主要风险：</strong>{{ check.risks|join('；') }}</p>{% endif %}
+  {% if check.missing_proof %}<p><strong>缺少证据：</strong>{{ check.missing_proof|join('；') }}</p>{% endif %}
+</article>{% else %}<p class="muted">尚无当前周期有效的事件条件。</p>{% endfor %}
+</section>
+<section class="analysis-panel" id="social-context">{{ social_context(security.social) }}</section>
 <section class="analysis-panel" id="pe-analysis">
   <div class="panel-heading">
     <div><p class="eyebrow">PE VALUATION</p><h2>四年 PE 估值</h2></div>
@@ -42,7 +61,7 @@
       {% if pe_analysis.valuation.status != "unavailable" %}
       <div class="valuation-metrics">
         <div><span>当前价</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_price) }} {{ security.currency }}</strong></div>
-        <div><span>近一年目标区间</span><strong>{{ "%.2f"|format(pe_analysis.valuation.price_low) }}–{{ "%.2f"|format(pe_analysis.valuation.price_high) }}</strong></div>
+        <div><span>{{ pe_analysis.valuation.year }} 年盈利估值情景</span><strong>{{ "%.2f"|format(pe_analysis.valuation.price_low) }}–{{ "%.2f"|format(pe_analysis.valuation.price_high) }}</strong></div>
         <div><span>当前隐含 PE</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_implied_pe) }}x</strong></div>
         <div><span>目标价空间</span><strong>{{ "%+.1f"|format(pe_analysis.valuation.price_change_low * 100) }}% 至 {{ "%+.1f"|format(pe_analysis.valuation.price_change_high * 100) }}%</strong></div>
       </div>

@@ -141,6 +141,7 @@ class WatchlistInput(BaseModel):
     query: str | None = Field(default=None, max_length=160)
     market: Market | None = None
     active: bool = True
+    holding_status: Literal["unknown", "flat", "long"] = "unknown"
 
     @field_validator("query")
     @classmethod

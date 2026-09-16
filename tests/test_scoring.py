@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from trade_news_analysis.models import Event, EventSecurityImpact, Security
+from trade_news_analysis.models import Event, EventSecurityImpact, Security, SecuritySignalSnapshot
 from trade_news_analysis.services.scoring import (
     aggregate_security,
     calculate_opportunity_score,
     evidence_quality,
     freshness_decay,
+    rebuild_signal_snapshots,
     summarize_components,
 )
 
@@ -128,8 +130,6 @@ def test_single_event_score_decays_and_expires(session: Session) -> None:
 
 
 def test_rebuild_skips_unchanged_states_and_ranks_within_market(session: Session) -> None:
-    from trade_news_analysis.services.scoring import rebuild_signal_snapshots
-
     securities = session.scalars(
         select(Security).where(Security.symbol.in_(["AAPL", "MSFT"]))
     ).all()
@@ -169,3 +169,85 @@ def test_rebuild_skips_unchanged_states_and_ranks_within_market(session: Session
     ranks = [item.rank for item in first if item.horizon == 5]
     assert all(rank is not None for rank in ranks)
     assert sorted(int(rank) for rank in ranks if rank is not None) == [1, 2]
+
+
+@pytest.mark.parametrize("invalidation", ["revoked", "narrative_only", "excluded", "future"])
+def test_rebuild_clears_invalidated_evidence_once(
+    session: Session, invalidation: str
+) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security is not None
+    now = datetime(2026, 8, 3, 12, tzinfo=UTC)
+    event = Event(event_key="invalidated", title="新增订单", status="complete", occurred_at=now)
+    session.add(event)
+    session.flush()
+    impact = EventSecurityImpact(
+        event_id=event.id,
+        security_id=security.id,
+        status="complete",
+        opportunity_score=80,
+        impacts={
+            str(horizon): {"direction": "bullish", "confidence": 0.8, "reason": event.title}
+            for horizon in (1, 5, 20)
+        },
+    )
+    session.add(impact)
+    session.commit()
+    initial = rebuild_signal_snapshots(session, now)
+    assert len(initial) == 3
+    assert all(snapshot.direction == "bullish" and snapshot.rank == 1 for snapshot in initial)
+
+    if invalidation == "revoked":
+        impact.is_current = False
+    elif invalidation == "narrative_only":
+        event.demand_status = "narrative_only"
+    elif invalidation == "future":
+        event.occurred_at = (now + timedelta(days=30)).replace(tzinfo=None)
+    else:
+        event.status = "excluded"
+    session.commit()
+
+    assert aggregate_security(security, 5, now + timedelta(minutes=10)) is None
+    cleared = rebuild_signal_snapshots(session, now + timedelta(minutes=10))
+    assert len(cleared) == 3
+    for snapshot in cleared:
+        assert snapshot.direction == "neutral"
+        assert snapshot.score == snapshot.confidence == snapshot.conflict == 0
+        assert snapshot.rank is None
+        assert snapshot.evidence_event_ids == []
+        assert snapshot.components == {"research_score": 0, "decision_score": 0, "events": []}
+    assert rebuild_signal_snapshots(session, now + timedelta(minutes=20)) == []
+    assert len(list(session.scalars(select(SecuritySignalSnapshot)))) == 6
+
+
+def test_rebuild_does_not_create_snapshots_without_prior_evidence(session: Session) -> None:
+    assert rebuild_signal_snapshots(session, datetime(2026, 8, 3, 12, tzinfo=UTC)) == []
+
+
+def test_rebuild_ignores_later_inserted_older_snapshots(session: Session) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security is not None
+    now = datetime(2026, 8, 3, 12, tzinfo=UTC)
+    session.add(
+        SecuritySignalSnapshot(
+            security_id=security.id,
+            horizon=5,
+            as_of=now,
+            components={"research_score": 0, "decision_score": 0, "events": []},
+        )
+    )
+    session.flush()
+    session.add(
+        SecuritySignalSnapshot(
+            security_id=security.id,
+            horizon=5,
+            as_of=now - timedelta(days=1),
+            score=64,
+            confidence=0.8,
+            direction="bullish",
+            evidence_event_ids=[123],
+        )
+    )
+    session.commit()
+
+    assert rebuild_signal_snapshots(session, now + timedelta(minutes=10)) == []

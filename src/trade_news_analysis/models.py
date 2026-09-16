@@ -291,6 +291,9 @@ class Watchlist(Base):
     )
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    holding_status: Mapped[str] = mapped_column(
+        String(20), default="unknown", server_default="unknown"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     security: Mapped[Security] = relationship(back_populates="watchlist_entry")
@@ -311,6 +314,7 @@ class PEAnalysisProfile(Base):
     source_net_income: Mapped[float | None] = mapped_column(Float)
     fiscal_year_override: Mapped[int | None] = mapped_column(Integer)
     price_override: Mapped[float | None] = mapped_column(Float)
+    manual_price_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     shares_outstanding_override: Mapped[float | None] = mapped_column(Float)
     revenue_override: Mapped[float | None] = mapped_column(Float)
     net_income_override: Mapped[float | None] = mapped_column(Float)

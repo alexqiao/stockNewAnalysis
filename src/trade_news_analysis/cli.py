@@ -78,11 +78,16 @@ def main() -> None:
 
     coordinator = PipelineCoordinator(factory, settings)
     if args.command == "x-ingest":
-        future = coordinator.submit_x_ingestion()
-        future.result()
-        coordinator.shutdown()
-        engine.dispose()
-        print("X ingestion completed")
+        try:
+            future = coordinator.submit_x_ingestion()
+            future.result()
+        except Exception as exc:
+            print(f"X 采集失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        finally:
+            coordinator.shutdown()
+            engine.dispose()
+        print("X 采集流程已结束；请在博主动态查看帖子，在运行状态确认各账号结果。")
         return
     run_id = coordinator.submit_pipeline("cli")
     try:

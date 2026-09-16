@@ -1,16 +1,39 @@
 {% extends "base.html" %}
+{% from "_decision.html" import decision, social_context %}
 {% block content %}
 <section class="hero">
   <div>
     <p class="eyebrow">TREND FIRST · EVIDENCE BACKED</p>
     <h1>从事件发现趋势，再用证据持续验证</h1>
-    <p class="lead">多篇新闻先聚合为事件，再映射行业、宏观资产和具体证券。机会榜展示趋势，不代表个股推荐或收益承诺。</p>
+    <p class="lead">先看自选股当前行动，再核对新闻、估值与博主线索。默认 5 个交易日，并列展示 1 日与 20 日判断。</p>
   </div>
   <button id="ingest-button" class="primary">立即采集</button>
 </section>
 
 {% if coverage.coverage_warning %}<div class="notice">{{ coverage.coverage_warning }}</div>{% endif %}
 <div id="run-message" class="notice hidden"></div>
+
+<section class="section-heading"><div><p class="eyebrow">WATCHLIST</p><h2>自选股当前研判</h2></div><a href="/watchlist">管理自选股</a></section>
+{% if watchlist and watchlist[0].social.collection.gaps %}<div class="notice">{{ watchlist[0].social.collection.gaps|join("；") }}。<a href="/x">检查博主采集</a></div>{% endif %}
+<div class="card-grid">
+  {% for item in watchlist %}
+  <article class="signal-card">
+    <div class="meta"><span>{{ item.security.market }} · {{ item.security.symbol }}</span><span>{{ horizon }} 日</span></div>
+    <h2><a href="/securities/{{ item.security.id }}">{{ item.security.name }}</a></h2>
+    {{ decision(item.judgment, item.security_id, item.signal, item.pe_analysis, compact=true) }}
+    <div class="horizon-comparison">{% for h in [1, 5, 20] %}<a href="/securities/{{ item.security_id }}?horizon={{ h }}">{{ h }} 日 · {{ item.judgments[h|string].action.label }}</a>{% endfor %}</div>
+    {% if item.invalidated_horizons %}<p class="notice">原信号包含已撤销证据，已暂停使用，请重新分析。</p>{% endif %}
+    {{ social_context(item.social, compact=true) }}
+    {% if item.judgment.macro %}
+    <p class="judgment-macro">
+      <strong>宏观背景：</strong><a href="/events/{{ item.judgment.macro.event_id }}">{{ item.judgment.macro.title }}</a><br>
+      <span>{{ item.judgment.macro.direction_note }}</span>
+    </p>
+    {% endif %}
+    <a class="judgment-detail" href="/securities/{{ item.security.id }}?horizon={{ horizon }}">查看买入与退出条件 →</a>
+  </article>
+  {% endfor %}
+</div>
 
 <section class="section-heading"><div><p class="eyebrow">OPPORTUNITY DISCOVERY</p><h2>跨市场机会榜</h2></div></section>
 <p class="muted">优先按证据事件的产业主题聚合，无主题时回退到行业；默认美股最多 4 个、A 股最多 4 个、港股最多 2 个。研究分描述逻辑强度，决策分进一步扣除低置信、陈旧和冲突信号。</p>
@@ -22,10 +45,8 @@
     </select>
   </label>
   <label>主题
-    <select name="theme">
-      <option value="">全部</option>
-      {% for item in themes %}<option value="{{ item.slug }}" {% if selected_theme == item.slug %}selected{% endif %}>{{ item.name }}</option>{% endfor %}
-    </select>
+    <input name="theme" id="theme-search" list="theme-options" value="{{ selected_theme or '' }}" placeholder="输入主题名称，留空为全部" autocomplete="off">
+    <datalist id="theme-options">{% for item in themes %}<option value="{{ item.name }}">{{ item.event_count }} 个事件</option>{% endfor %}</datalist>
   </label>
   <label>周期
     <select name="horizon">
@@ -55,34 +76,6 @@
   </table>
 </section>
 
-<section class="section-heading"><div><p class="eyebrow">WATCHLIST</p><h2>自选股当前研判</h2></div><a href="/watchlist">管理自选股</a></section>
-<div class="card-grid">
-  {% for item in watchlist %}
-  <article class="signal-card">
-    <div class="meta"><span>{{ item.security.market }} · {{ item.security.symbol }}</span><span>{{ horizon }} 日</span></div>
-    <h2><a href="/securities/{{ item.security.id }}">{{ item.security.name }}</a></h2>
-    <div class="judgment-verdict {{ item.judgment.status }}">
-      <span>{{ item.judgment.stance }}</span>
-      <strong>{{ item.judgment.label }}</strong>
-    </div>
-    <p class="judgment-summary">{{ item.judgment.summary }}</p>
-    <div class="judgment-factors">
-      <span>{{ item.judgment.news.label }}</span>
-      <span>{{ item.judgment.valuation.label }}</span>
-      {% if item.signal %}<span>决策分 {{ "%+.1f"|format(item.signal.decision_score) }}</span>{% endif %}
-    </div>
-    {% if item.judgment.key_events %}<p class="judgment-evidence"><strong>主要事件：</strong>{{ item.judgment.key_events|join("；") }}</p>{% endif %}
-    {% if item.judgment.macro %}
-    <p class="judgment-macro">
-      <strong>宏观背景：</strong><a href="/events/{{ item.judgment.macro.event_id }}">{{ item.judgment.macro.title }}</a><br>
-      <span>{{ item.judgment.macro.direction_note }}</span>
-    </p>
-    {% endif %}
-    <a class="judgment-detail" href="/securities/{{ item.security.id }}#pe-analysis">查看新闻证据与 PE 假设 →</a>
-  </article>
-  {% endfor %}
-</div>
-
 <section class="section-heading"><div><p class="eyebrow">EVENT EVIDENCE</p><h2>最近事件</h2></div></section>
 <div class="news-grid">
   {% for event in events %}
@@ -101,6 +94,22 @@
 {% endblock %}
 {% block scripts %}
 <script>
+const themeSearch = document.getElementById('theme-search');
+let themeTimer;
+themeSearch.addEventListener('input', function () {
+  clearTimeout(themeTimer);
+  const value = this.value;
+  themeTimer = setTimeout(async function () {
+    try {
+      const response = await fetch('/api/v1/themes?' + new URLSearchParams({q: value, limit: '30'}));
+      if (!response.ok || themeSearch.value !== value) return;
+      const themes = await response.json();
+      document.getElementById('theme-options').replaceChildren(...themes.map(function (theme) {
+        const option = document.createElement('option'); option.value = theme.name; return option;
+      }));
+    } catch (error) { /* Exact theme names can still be submitted if suggestions fail. */ }
+  }, 220);
+});
 document.getElementById('ingest-button').addEventListener('click', async function () {
   const button = this;
   const message = document.getElementById('run-message');
