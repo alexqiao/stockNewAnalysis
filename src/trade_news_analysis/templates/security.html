@@ -10,6 +10,77 @@
   <p class="muted">资料完整度 {{ "%.0f"|format(security.data_quality * 100) }}%{% if security.data_gaps %} · 待补：{{ security.data_gaps|join("、") }}{% endif %}</p>
   </details>
 </section>
+{% if security.reanalysis_events %}<details class="notice" open><summary>部分事件资料已变化，等待重新分析</summary><ul>{% for item in security.reanalysis_events %}<li><a href="/events/{{ item.id }}">{{ item.title }}</a> · {{ item.reason }}</li>{% endfor %}</ul><a href="/research?security_id={{ security.id }}#facts">补充原文与核验依据 →</a></details>{% endif %}
+{% if security.market in ["US", "HK"] %}
+<section class="analysis-panel daily-bars-panel" id="daily-bars" data-security-id="{{ security.id }}" aria-labelledby="daily-bars-title">
+  <div class="panel-heading">
+    <div><p class="eyebrow">DAILY PRICE</p><h2 id="daily-bars-title">每日行情 / K 线</h2></div>
+    <button type="button" id="daily-bars-refresh" class="secondary">刷新行情</button>
+  </div>
+  <div class="daily-bars-toolbar">
+    <div class="daily-bars-ranges" role="group" aria-label="行情时间区间">
+      {% for months, label in [(3, "3 月"), (6, "6 月"), (12, "1 年"), (36, "3 年"), (60, "5 年")] %}<button type="button" class="secondary" data-months="{{ months }}" aria-pressed="{{ 'true' if months == 12 else 'false' }}">{{ label }}</button>{% endfor %}
+    </div>
+    <label class="daily-bars-adjustment">价格口径<select id="daily-bars-adjustment"><option value="total_return_adjusted">含分红调整价格</option><option value="split_adjusted">拆股调整价格</option></select></label>
+  </div>
+  <div class="daily-bars-indicators" role="group" aria-label="均线">
+    {% for period in [5, 10, 20, 60] %}<label class="daily-ma-{{ period }}"><input type="checkbox" data-ma="{{ period }}" checked>MA{{ period }} <span data-ma-value="{{ period }}">—</span></label>{% endfor %}
+    <span class="daily-bars-color-key"><span class="daily-up">■ 红涨</span> · <span class="daily-down">■ 绿跌</span></span>
+  </div>
+  <div class="daily-bars-indicators daily-bars-bollinger" role="group" aria-label="布林带">
+    <label title="中轨为20日收盘均价，上下轨为中轨加减2倍总体标准差；不足20个交易日时不显示。"><input type="checkbox" id="daily-bars-bollinger" checked>布林带 BOLL(20,2)</label>
+    <span>上轨 <span data-bollinger-value="upper">—</span></span>
+    <span>中轨 <span data-bollinger-value="middle">—</span></span>
+    <span>下轨 <span data-bollinger-value="lower">—</span></span>
+  </div>
+  <p id="daily-bars-meta" class="muted daily-bars-meta">正在读取本地日线…</p>
+  <p id="daily-bars-status" class="daily-bars-status" role="status" aria-live="polite">正在加载行情…</p>
+  <p id="daily-bars-adjustment-note" class="notice hidden"></p>
+  <div id="daily-bars-quote" class="daily-bars-quote" aria-label="所选交易日行情">日线仅包含已收盘交易日。</div>
+  <div id="daily-bars-chart" class="daily-bars-chart hidden" role="img" aria-label="每日蜡烛图、均线、布林带与成交量图，支持拖动、缩放和十字光标"></div>
+  <p id="daily-bars-empty" class="empty hidden">尚无已收盘日线，采集完成后将在此显示。</p>
+  <p class="muted daily-bars-footnote">成交量单位：股。鼠标滚轮缩放、拖动平移；触屏长按查看当日行情。图表由 <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView Lightweight Charts™</a> 提供。Copyright © 2025 TradingView, Inc. · <a href="/static/lightweight-charts-NOTICE.txt" target="_blank" rel="noopener">NOTICE</a> · <a href="/static/lightweight-charts-LICENSE.txt" target="_blank" rel="noopener">Apache 2.0</a></p>
+  <noscript><p class="notice">启用 JavaScript 后可查看行情图表。</p></noscript>
+</section>
+<section class="analysis-panel bollinger-reference" id="bollinger-reference" data-security-id="{{ security.id }}" aria-labelledby="bollinger-reference-title">
+  <div class="panel-heading"><div><p class="eyebrow">DAILY CONDITIONS</p><h2 id="bollinger-reference-title">布林带操作参考</h2></div><span class="tag">仅使用已收盘日线</span></div>
+  <p class="muted">核对中轨回踩与止损条件，供研究参考。新闻、估值与其他风险请结合下方综合行动判断。</p>
+  <p id="bollinger-reference-status" role="status" aria-live="polite">正在读取本地行情并计算条件…</p>
+  <p id="bollinger-reference-meta" class="muted"></p>
+  <div id="bollinger-reference-results" class="hidden">
+    <div class="bollinger-reference-action" id="bollinger-reference-action"><strong id="bollinger-reference-label">—</strong><p id="bollinger-reference-reason"></p></div>
+    <p id="bollinger-reference-technical" class="muted hidden"></p>
+    <p class="muted">这里不提供可买股数；如需下单，请先核对持仓与风险方案。</p>
+    <div id="bollinger-reference-guardrails" class="notice hidden"><strong>风险与数据检查</strong><ul></ul></div>
+    <p id="bollinger-reference-setup"></p>
+    <p id="bollinger-reference-lower" class="notice"></p>
+    <dl id="bollinger-reference-levels" class="bollinger-reference-levels"></dl>
+    <div class="bollinger-reference-columns">
+      <div><h3>条件核对</h3><ul id="bollinger-reference-checks" class="bollinger-reference-checks"></ul></div>
+      <div>
+        <h3>持仓与支撑</h3><p id="bollinger-reference-position"></p>
+        <p id="bollinger-reference-holdings-note" class="muted" hidden></p>
+        <details id="bollinger-reference-supports-details">
+          <summary id="bollinger-reference-supports-summary">已确认的支撑点</summary>
+          <ul id="bollinger-reference-supports"></ul>
+        </details>
+      </div>
+    </div>
+    <div class="bollinger-reference-add-on"><h3>加仓未启用</h3><p id="bollinger-reference-tranches">20% / 20% / 20% / 40% 为计划仓位比例，不表示已经执行。</p><p class="muted">待满足条件</p><ul id="bollinger-reference-add-on-conditions"></ul></div>
+    <div id="bollinger-reference-warnings" class="notice hidden"><strong>数据与使用说明</strong><ul></ul></div>
+    <details class="bollinger-reference-definitions"><summary>查看判断口径与近期事件</summary><ul id="bollinger-reference-definitions"></ul><ul id="bollinger-reference-events"></ul></details>
+  </div>
+  <form id="bollinger-reference-form">
+    <details id="bollinger-reference-parameters"><summary>调整参考参数</summary>
+      <p class="muted">固定口径：BOLL(20, 2)，ATR14，支撑拐点左右各 2 日确认，均量 20 日，收缩观察 3 日。以下参数保存在本浏览器，供所有股票复用。</p>
+      <div class="bollinger-reference-parameter-grid" id="bollinger-reference-primary-parameters"></div>
+      <details class="bollinger-reference-advanced"><summary>更多条件参数</summary><div class="bollinger-reference-parameter-grid" id="bollinger-reference-advanced-parameters"></div></details>
+    </details>
+    <p id="bollinger-reference-parameter-message" class="muted" role="status"></p>
+    <div class="actions bollinger-reference-buttons"><button type="submit" class="secondary" id="bollinger-reference-recalculate">重新计算</button><button type="button" class="secondary" id="bollinger-reference-reset">恢复默认</button></div>
+  </form>
+</section>
+{% endif %}
 <section class="analysis-panel" id="decision">
   <div class="panel-heading"><h2>{{ horizon }} 日行动判断</h2><a href="/watchlist">更新持仓</a></div>
   {{ decision(security.judgment, security.id, security.signal, security.pe_analysis) }}
@@ -19,22 +90,24 @@
 {% for horizon in [1, 5, 20] %}{% set signal = security.signals[horizon|string] %}
   <div class="horizon {{ signal.direction if signal else 'neutral' }}">
     <strong>{{ horizon }} 个交易日</strong>
-    <a href="/securities/{{ security.id }}?horizon={{ horizon }}"><strong>{{ security.judgments[horizon|string].action.label }}</strong></a>
+    <a href="/securities/{{ security.id }}?horizon={{ horizon }}"><strong>{{ security.judgments[horizon|string].strategy.execution.next_action }}</strong></a>
     {% if signal %}<span>{{ signal.direction }} · 决策分 {{ "%.1f"|format(signal.decision_score) }}</span><p>研究分 {{ "%.1f"|format(signal.research_score) }} · 置信度 {{ "%.0f"|format(signal.confidence * 100) }}% · 冲突度 {{ "%.0f"|format(signal.conflict * 100) }}%</p>{% else %}<span>尚无信号</span>{% endif %}
   </div>
 {% endfor %}
 </div>
 <section class="analysis-panel"><h2>需要验证的事件条件</h2>
+<p class="muted">这里的“预计事件”指订单签约、产品交付、财报发布等可能改变公司经营判断的事情。核对它是否按时发生、结果是否支持原假设；发生本身不保证股价上涨。</p>
 {% for check in security.event_checks %}<article class="social-context-post">
   <h3><a href="/events/{{ check.event_id }}">{{ check.title }}</a></h3>
-  <p><strong>催化兑现：</strong>{{ check.catalysts|join('；') or '尚未提供具体催化，需补充' }}</p>
+  <p><strong>待跟踪的预计事件：</strong>{{ check.catalysts|join('；') or '尚未提供具体事件，需补充' }}</p>
   <p><strong>判断失效：</strong>{{ check.falsifiers|join('；') or '尚未提供可检验条件，需补充' }}</p>
+  {% if check.price_reaction %}{% set reaction = check.price_reaction %}<p><strong>披露后的价格反应：</strong>{% if reaction.return_pct is not none %}{{ '%+.2f%%'|format(reaction.return_pct) }} · {{ reaction.sessions_observed }} 个已完成交易日 · 行业超额 {{ '%+.2f%%'|format(reaction.industry_excess_return_pct) if reaction.industry_excess_return_pct is not none else '未知' }}{% else %}{{ reaction.reason }}{% endif %}</p><p class="muted">{{ reaction.note }}</p>{% endif %}
   {% if check.risks %}<p><strong>主要风险：</strong>{{ check.risks|join('；') }}</p>{% endif %}
   {% if check.missing_proof %}<p><strong>缺少证据：</strong>{{ check.missing_proof|join('；') }}</p>{% endif %}
 </article>{% else %}<p class="muted">尚无当前周期有效的事件条件。</p>{% endfor %}
 </section>
 <section class="analysis-panel" id="social-context">{{ social_context(security.social) }}</section>
-<section class="analysis-panel" id="pe-analysis">
+<section class="analysis-panel" id="pe-analysis"{% if pe_analysis %} data-endpoint="/api/v1/securities/{{ security.id }}/pe-analysis" data-refresh-recommended="{{ 'true' if pe_analysis.refresh_recommended else 'false' }}"{% endif %}>
   <div class="panel-heading">
     <div><p class="eyebrow">PE VALUATION</p><h2>四年 PE 估值</h2></div>
     {% if pe_analysis %}<div class="actions"><button type="button" id="refresh-pe" class="secondary">刷新基础数据</button><button type="button" id="save-pe" class="primary">保存并重算</button></div>{% endif %}
@@ -43,7 +116,7 @@
     <div class="empty">请先在<a href="/watchlist">自选股管理</a>中加入该证券，再保存估值假设。</div>
   {% else %}
     <p class="muted">基础数据来自 {{ pe_analysis.source.name }}；营收增速、净利润增速和 PE 区间由你设定。模型仅供研究，不构成投资建议。</p>
-    <div id="pe-message" class="notice hidden"></div>
+    <div id="pe-message" role="status" aria-live="polite" class="notice hidden"></div>
     {% if pe_analysis.warnings %}<div class="notice"><strong>模型检查</strong><ul>{% for warning in pe_analysis.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>{% endif %}
     <div class="pe-source-grid">
       <div><span>自动数据状态</span><strong>{{ pe_analysis.source.status }}</strong></div>
@@ -63,7 +136,7 @@
         <div><span>当前价</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_price) }} {{ security.currency }}</strong></div>
         <div><span>{{ pe_analysis.valuation.year }} 年盈利估值情景</span><strong>{{ "%.2f"|format(pe_analysis.valuation.price_low) }}–{{ "%.2f"|format(pe_analysis.valuation.price_high) }}</strong></div>
         <div><span>当前隐含 PE</span><strong>{{ "%.2f"|format(pe_analysis.valuation.current_implied_pe) }}x</strong></div>
-        <div><span>目标价空间</span><strong>{{ "%+.1f"|format(pe_analysis.valuation.price_change_low * 100) }}% 至 {{ "%+.1f"|format(pe_analysis.valuation.price_change_high * 100) }}%</strong></div>
+        <div><span>年度情景价差</span><strong>{{ "%+.1f"|format(pe_analysis.valuation.price_change_low * 100) }}% 至 {{ "%+.1f"|format(pe_analysis.valuation.price_change_high * 100) }}%</strong></div>
       </div>
       {% endif %}
       <p>{{ pe_analysis.valuation.reason }}</p>
@@ -100,14 +173,14 @@
         <thead><tr><th>年度</th><th>营收增速</th><th>营收</th><th>净利润增速</th><th>净利润</th><th>净利率</th><th>EPS</th><th>PE Low</th><th>PE High</th><th>目标价区间</th><th>相对当前价</th><th>CAGR 区间</th><th>判断</th></tr></thead>
         <tbody>{% for row in pe_analysis.forecast %}<tr data-year-offset="{{ row.year_offset }}">
           <td><strong>{{ row.year or ("第 " ~ row.year_offset ~ " 年") }}</strong></td>
-          <td><input data-assumption="revenue_growth" type="number" min="-99.99" step="0.1" value="{% if row.revenue_growth is not none %}{{ '%.2f'|format(row.revenue_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
+          <td><input data-assumption="revenue_growth" type="number" min="-99.99" step="0.01" value="{% if row.revenue_growth is not none %}{{ '%.2f'|format(row.revenue_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
           <td>{% if row.revenue is not none %}{{ "{:,.0f}".format(row.revenue) }}{% else %}—{% endif %}</td>
-          <td><input data-assumption="net_income_growth" type="number" min="-99.99" step="0.1" value="{% if row.net_income_growth is not none %}{{ '%.2f'|format(row.net_income_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
+          <td><input data-assumption="net_income_growth" type="number" min="-99.99" step="0.01" value="{% if row.net_income_growth is not none %}{{ '%.2f'|format(row.net_income_growth * 100) }}{% endif %}"><span class="input-suffix">%</span></td>
           <td>{% if row.net_income is not none %}{{ "{:,.0f}".format(row.net_income) }}{% else %}—{% endif %}</td>
           <td>{% if row.net_margin is not none %}{{ "%.1f"|format(row.net_margin * 100) }}%{% else %}—{% endif %}</td>
           <td>{% if row.eps is not none %}{{ "%.2f"|format(row.eps) }}{% else %}—{% endif %}</td>
-          <td><input data-assumption="pe_low" type="number" min="0.01" step="0.1" value="{{ row.pe_low }}"></td>
-          <td><input data-assumption="pe_high" type="number" min="0.01" step="0.1" value="{{ row.pe_high }}"></td>
+          <td><input data-assumption="pe_low" type="number" min="0.01" step="0.01" value="{{ row.pe_low }}"></td>
+          <td><input data-assumption="pe_high" type="number" min="0.01" step="0.01" value="{{ row.pe_high }}"></td>
           <td>{% if row.price_low is not none %}{{ "%.2f"|format(row.price_low) }}–{{ "%.2f"|format(row.price_high) }}{% else %}—{% endif %}</td>
           <td>{% if row.price_change_low is not none %}{{ "%+.1f"|format(row.price_change_low * 100) }}%<br>{{ "%+.1f"|format(row.price_change_high * 100) }}%{% else %}—{% endif %}</td>
           <td>{% if row.cagr_low is not none %}{{ "%+.2f"|format(row.cagr_low * 100) }}%<br>{{ "%+.2f"|format(row.cagr_high * 100) }}%{% else %}—{% endif %}</td>
@@ -128,35 +201,6 @@
   {% else %}<div class="empty">尚无已验证事件影响。</div>{% endfor %}
 </section>
 {% endblock %}
-{% block scripts %}{% if pe_analysis %}<script>
-const peRoot = document.getElementById('pe-analysis');
-const peMessage = document.getElementById('pe-message');
-const peEndpoint = '/api/v1/securities/{{ security.id }}/pe-analysis';
-function nullableNumber(input) { const value = input.value.trim(); return value === '' ? null : Number(value); }
-function pePayload() {
-  const overrides = {};
-  peRoot.querySelectorAll('[data-override]').forEach(function (input) { overrides[input.dataset.override] = nullableNumber(input); });
-  const assumptions = Array.from(peRoot.querySelectorAll('#pe-table tbody tr')).map(function (row) {
-    const value = function (name) { return nullableNumber(row.querySelector('[data-assumption="' + name + '"]')); };
-    const revenueGrowth = value('revenue_growth'); const netIncomeGrowth = value('net_income_growth');
-    return {year_offset: Number(row.dataset.yearOffset), revenue_growth: revenueGrowth === null ? null : revenueGrowth / 100, net_income_growth: netIncomeGrowth === null ? null : netIncomeGrowth / 100, pe_low: value('pe_low'), pe_high: value('pe_high')};
-  });
-  return {overrides: overrides, assumptions: assumptions};
-}
-async function showPeResponse(response, successText) {
-  const data = await response.json(); peMessage.classList.remove('hidden');
-  if (!response.ok) { peMessage.textContent = '操作失败：' + (data.detail || JSON.stringify(data)); return false; }
-  peMessage.textContent = successText; window.setTimeout(function () { window.location.reload(); }, 300); return true;
-}
-document.getElementById('save-pe').onclick = async function () {
-  const response = await fetch(peEndpoint, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(pePayload())});
-  await showPeResponse(response, '估值假设已保存并重算。');
-};
-async function refreshPe() {
-  const response = await fetch(peEndpoint + '/refresh', {method: 'POST'});
-  await showPeResponse(response, '基础数据已刷新。');
-}
-document.getElementById('refresh-pe').onclick = refreshPe;
-document.getElementById('clear-pe-overrides').onclick = function () { peRoot.querySelectorAll('[data-override]').forEach(function (input) { input.value = ''; }); document.getElementById('save-pe').click(); };
-{% if pe_analysis.refresh_recommended %}window.addEventListener('load', refreshPe, {once: true});{% endif %}
-</script>{% endif %}{% endblock %}
+{% block scripts %}
+{% if security.market in ["US", "HK"] %}<script src="/static/lightweight-charts-5.0.9.standalone.production.js" defer></script><script src="/static/bollinger-reference.js?v={{ asset_version }}" defer></script><script src="/static/daily-bars.js?v={{ asset_version }}" defer></script>{% endif %}
+{% if pe_analysis %}<script src="/static/pe-analysis.js?v={{ asset_version }}" defer></script>{% endif %}{% endblock %}

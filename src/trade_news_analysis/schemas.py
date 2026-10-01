@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -141,7 +141,7 @@ class WatchlistInput(BaseModel):
     query: str | None = Field(default=None, max_length=160)
     market: Market | None = None
     active: bool = True
-    holding_status: Literal["unknown", "flat", "long"] = "unknown"
+    holding_status: Literal["unknown", "flat", "long", "short"] = "unknown"
 
     @field_validator("query")
     @classmethod
@@ -214,3 +214,6 @@ class RunResponse(ORMModel):
     articles_new: int
     analyses_created: int
     errors: list[str]
+    phase: str
+    is_terminal: bool
+    summary: dict[str, Any]

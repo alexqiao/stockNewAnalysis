@@ -12,7 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Security, SecuritySignalSnapshot, SignalOutcome
+from .evaluation import EVALUATION_VERSION
+from .evidence import EVIDENCE_RULE_VERSION
 from .normalization import ensure_aware
+from .scoring import evidence_rule_version
 
 MetricRow = tuple[SignalOutcome, SecuritySignalSnapshot, Security]
 
@@ -148,36 +151,7 @@ def _summarize(
     }
 
 
-def build_metrics(
-    session: Session,
-    security_id: int | None = None,
-    market: str | None = None,
-    horizon: int | None = None,
-    since: datetime | None = None,
-    top_k: int = 10,
-) -> dict[str, Any]:
-    query = (
-        select(SignalOutcome, SecuritySignalSnapshot, Security)
-        .join(SecuritySignalSnapshot, SignalOutcome.snapshot_id == SecuritySignalSnapshot.id)
-        .join(Security, SecuritySignalSnapshot.security_id == Security.id)
-    )
-    if security_id:
-        query = query.where(Security.id == security_id)
-    if market:
-        query = query.where(Security.market == market)
-    if horizon:
-        query = query.where(SecuritySignalSnapshot.horizon == horizon)
-    if since:
-        query = query.where(SecuritySignalSnapshot.as_of >= since)
-    raw_rows = cast(
-        list[MetricRow],
-        list(session.execute(query).tuples().all()),
-    )
-    raw_rows = [
-        row
-        for row in raw_rows
-        if "decision_score" in (row[1].components or {})
-    ]
+def _version_metrics(raw_rows: list[MetricRow], top_k: int) -> dict[str, Any]:
     all_rows = _deduplicate_decisions(raw_rows)
     rows = [
         row
@@ -201,4 +175,48 @@ def build_metrics(
             else "insufficient"
         ),
         "by_market": markets,
+    }
+
+
+def build_metrics(
+    session: Session,
+    security_id: int | None = None,
+    market: str | None = None,
+    horizon: int | None = None,
+    since: datetime | None = None,
+    top_k: int = 10,
+) -> dict[str, Any]:
+    query = (
+        select(SignalOutcome, SecuritySignalSnapshot, Security)
+        .join(SecuritySignalSnapshot, SignalOutcome.snapshot_id == SecuritySignalSnapshot.id)
+        .join(Security, SecuritySignalSnapshot.security_id == Security.id)
+    )
+    if security_id:
+        query = query.where(Security.id == security_id)
+    if market:
+        query = query.where(Security.market == market)
+    if horizon:
+        query = query.where(SecuritySignalSnapshot.horizon == horizon)
+    if since:
+        query = query.where(SecuritySignalSnapshot.as_of >= since)
+    raw_rows = cast(list[MetricRow], list(session.execute(query).tuples().all()))
+    versions: dict[str, list[MetricRow]] = {"legacy-v1": [], EVALUATION_VERSION: []}
+    for row in raw_rows:
+        if "decision_score" in (row[1].components or {}):
+            versions.setdefault(row[0].evaluation_version, []).append(row)
+    grouped = {}
+    for version, rows in versions.items():
+        rule_rows: dict[str, list[MetricRow]] = {"legacy-v1": [], EVIDENCE_RULE_VERSION: []}
+        for row in rows:
+            rule_rows.setdefault(evidence_rule_version(row[1].components), []).append(row)
+        by_rule = {
+            rule: {**_version_metrics(items, top_k), "evidence_rule_version": rule,
+                   "evaluation_version": version}
+            for rule, items in rule_rows.items()
+        }
+        primary_rule = EVIDENCE_RULE_VERSION if version == EVALUATION_VERSION else "legacy-v1"
+        grouped[version] = {**by_rule[primary_rule], "by_evidence_rule_version": by_rule}
+    return {
+        **grouped[EVALUATION_VERSION],
+        "by_evaluation_version": grouped,
     }

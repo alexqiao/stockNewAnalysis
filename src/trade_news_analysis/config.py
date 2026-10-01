@@ -87,9 +87,9 @@ class Settings(BaseSettings):
 
     app_name: str = "金融新闻影响分析平台"
     database_url: str = "sqlite:///./data/trade_news.db"
-    llm_base_url: str = "https://api.openai.com/v1"
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: SecretStr | None = None
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "stealth/space-bunny-alpha"
     llm_thinking: Literal["enabled", "disabled"] | None = None
     tushare_token: SecretStr | None = None
     tushare_news_enabled: bool = False
@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     ingest_interval_minutes: int = Field(default=30, ge=5, le=1440)
     x_browser_enabled: bool = False
+    research_refresh_enabled: bool = True
+    research_refresh_interval_hours: int = Field(default=6, ge=1, le=168)
+    daily_bars_enabled: bool = True
     x_fetch_mode: Literal["auto", "browser", "public"] = "auto"
     x_browser_proxy_url: SecretStr | None = None
     x_browser_headless: bool = True

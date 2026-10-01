@@ -18,6 +18,24 @@ _FUTURE_TOLERANCE = timedelta(minutes=5)
 _SNOWFLAKE_EPOCH_MS = 1288834974657
 
 
+class XProfileUnavailableError(ValueError):
+    """The profile explicitly reports that the account cannot be accessed."""
+
+
+def check_profile_availability(html: str) -> None:
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup.select("article, script, style"):
+        node.decompose()
+    headings = soup.select('h1, h2, h3, [role="heading"]')
+    if any(node.get_text(" ", strip=True) in {
+        "Account suspended", "账号已被冻结", "帳戶已停用"
+    } for node in headings):
+        raise XProfileUnavailableError(
+            "X 页面显示账号已停用（Account suspended），无法采集帖子；"
+            "请核对账号状态，恢复前可在博主配置中停用采集"
+        )
+
+
 def _status(anchor: Tag) -> tuple[str, str] | None:
     value = anchor.get("href")
     if not isinstance(value, str):
@@ -195,5 +213,6 @@ def parse_public_profile(html: str, handle: str) -> list[dict[str, Any]]:
         if payload := _parse_article(article, handle, now):
             posts[payload["url"]] = payload
     if not posts:
+        check_profile_availability(html)
         raise ValueError("X 公开页面没有可解析的帖子；可能需要登录或页面结构已变化")
     return list(posts.values())

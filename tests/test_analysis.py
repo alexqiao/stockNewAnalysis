@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,8 +16,10 @@ from trade_news_analysis.models import (
     Event,
     EventArticle,
     EventSecurityImpact,
+    Security,
     Theme,
 )
+from trade_news_analysis.research_data_models import ResearchFinancialFact
 from trade_news_analysis.services.analysis import EventAnalyzer, build_event_prompt, extract_json
 
 VALID_EVENT_PAYLOAD = {
@@ -140,6 +144,40 @@ def test_two_stage_analysis_resolves_only_known_security(
     assert result.unresolved_candidates[0]["symbol"] == "FAKE"
 
 
+def test_analysis_receives_available_financial_facts_and_explicit_market_gaps(
+    session: Session, settings: Settings,
+) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security
+    now = datetime.now(UTC)
+    for fingerprint, value, available_at in (
+        ("known-fact", 1234567, now - timedelta(days=1)),
+        ("future-fact", 9876543, now + timedelta(days=2)),
+    ):
+        session.add(ResearchFinancialFact(
+            fingerprint=fingerprint, security_id=security.id, source="sec_companyfacts",
+            source_url="https://www.sec.gov/Archives/edgar/data/320193/filing.htm",
+            concept="us-gaap:Revenues", value=value, unit="USD",
+            period_start=date(2025, 1, 1), period_end=date(2025, 3, 31),
+            available_at=available_at, observed_at=available_at,
+        ))
+    session.commit()
+    event = add_pending_event(session)
+    prompts = []
+
+    def capture(system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        return completion(system, prompt)
+
+    EventAnalyzer(settings, completion=capture).analyze_event(session, event)
+    prompt = prompts[-1]
+    assert "1234567" in prompt and "9876543" not in prompt
+    assert "sec_companyfacts" in prompt and "2025-03-31" in prompt
+    assert '"status": "missing"' in prompt
+    assert "X 核验记录只用于" in prompt
+    assert "年度/TTM 数据只支持经营背景" in prompt
+
+
 def test_analyzer_repairs_invalid_event_json_once(
     session: Session, settings: Settings
 ) -> None:
@@ -162,6 +200,25 @@ def test_analyzer_without_key_is_unavailable(session: Session, settings: Setting
     result = EventAnalyzer(settings).analyze_event(session, event)
     assert result.status == "unavailable"
     assert result.error == "LLM未配置"
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_pending_analysis_records_failed_event_ids_and_clears_between_batches(
+    session: Session, settings: Settings, configured: bool,
+) -> None:
+    event = add_pending_event(session)
+    event.updated_at = datetime.now(UTC) - timedelta(days=1)
+    session.commit()
+
+    def failing_completion(_system: str, _prompt: str) -> str:
+        raise TimeoutError("isolated discovery failure")
+
+    analyzer = EventAnalyzer(settings, completion=failing_completion if configured else None)
+    assert analyzer.analyze_pending(session) == 1
+    assert event.status == ("error" if configured else "unavailable")
+    assert analyzer.last_processed_event_ids == [event.id]
+    assert analyzer.analyze_pending(session) == 0
+    assert analyzer.last_processed_event_ids == []
 
 
 def test_narrative_only_event_stays_out_of_ranked_impacts(

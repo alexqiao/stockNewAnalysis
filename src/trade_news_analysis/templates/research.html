@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% from "_workflow.html" import claims_panel %}
+{% set calendar_status_labels = {'scheduled': '已安排', 'confirmed': '已确认', 'estimated': '预计', 'provider_reported': '提供方披露', 'reported': '已公布', 'released': '已公布', 'completed': '已完成', 'cancelled': '已取消'} %}
+{% set precision_labels = {'date': '仅日期', 'datetime': '精确时间', 'bmo': '盘前', 'amc': '盘后', 'dmh': '盘中'} %}
+{% set source_labels = {'sec': 'SEC 官方披露', 'sec_companyfacts': 'SEC 财务事实', 'sec_submissions': 'SEC 申报记录', 'sec_attachments': 'SEC 财报附件', 'finnhub': 'Finnhub 公司日历', 'finnhub_earnings': 'Finnhub 财报日历', 'finnhub_dividend': 'Finnhub 分红日历', 'tushare': 'Tushare 公司数据', 'tushare_disclosure_date': 'Tushare 披露日历', 'tushare_dividend': 'Tushare 分红日历', 'tushare_fina_indicator': 'Tushare 财务指标', 'bls_calendar': 'BLS 官方日历', 'bls_actual': 'BLS 官方实测值', 'fomc_calendar': '美联储会议日历', 'manual_official': '人工登记的官方原文', 'hkex_public': '港交所披露易'} %}
+{% set source_status_labels = {'available': '已更新', 'stale': '待刷新', 'restricted': '访问受限', 'missing': '未配置 / 未启用', 'degraded': '刷新失败', 'unknown': '尚未核对'} %}
+{% macro source_name(value) -%}{{ {'bls_actual:CES0000000001': 'BLS 非农就业人数', 'bls_actual:LNS14000000': 'BLS 失业率'}.get(value, source_labels.get(value.split(':')[0], value)) }}{%- endmacro %}
+{% macro short_time(value) -%}
+  {% if not value %}暂无{% elif 'T' in value %}{{ value[:10] }} {{ value[11:16] }}{% if value.endswith('+00:00') or value.endswith('Z') %} UTC{% else %} {{ value[-6:] }}{% endif %}{% else %}{{ value }}{% endif %}
+{%- endmacro %}
+{% macro calendar_time(item) -%}
+  <time datetime="{{ item.scheduled_at or item.scheduled_date }}">{{ short_time(item.scheduled_at or item.scheduled_date) }}</time>
+  <small>事件时区：{{ item.timezone }}</small><small>{{ precision_labels.get(item.time_precision, item.time_precision) }}</small>
+{%- endmacro %}
+{% block title %}研究与行动工作台{% endblock %}
+{% block content %}
+<div class="research-workbench">
+<section class="page-heading">
+  <p class="eyebrow">事实 · 核验 · 风险 · 结果</p><h1>研究与行动工作台</h1>
+  <p>默认围绕 5 个交易日判断，保留 1 日与 20 日对照。先核实变化，再核对自己的持仓约束。</p>
+  <div class="actions"><button id="refresh-research" class="primary">刷新已有与官方来源</button><button class="secondary" data-workflow-capture>保存当前行动与判断快照</button><a href="#calibration">查看结果验证 ↓</a></div>
+  <p id="research-message" role="status" class="notice hidden"></p>
+</section>
+<form class="filters" method="get"><label>研究标的<select name="security_id">{% for item in securities %}<option value="{{ item.id }}" {% if item.id == selected %}selected{% endif %}>{{ item.name }} · {{ item.symbol }}</option>{% endfor %}</select></label><button class="secondary">查看</button>{% if selected %}<a href="/securities/{{ selected }}">回到买卖条件与行动项 →</a>{% endif %}</form>
+{% if research %}
+{% set data = research.data %}{% set market = research.market %}{% set risk = research.risk %}
+<section class="analysis-panel" id="calendar"><h2>事件日历与改期记录</h2>
+<p class="muted">只有日期时不假定盘前或盘后；宏观日历不包含市场一致预期。改期会保留旧版本。</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="当前事件日历，可横向滚动"><table><thead><tr><th>时间与时区</th><th>事件</th><th>确认状态 / 版本</th><th>来源</th></tr></thead><tbody>
+{% for item in data.calendar %}<tr><td>{{ calendar_time(item) }}</td><td>{{ item.title }}</td><td>{{ calendar_status_labels.get(item.status, item.status) }}<small>第 {{ item.revision }} 版</small></td><td><a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">{{ source_name(item.source) }} ↗</a><small>核对：{{ short_time(item.observed_at) }}</small></td></tr>{% else %}<tr><td colspan="4">尚无可用事件安排。可从官方公告补录；缺失不表示未来没有事件。</td></tr>{% endfor %}
+</tbody></table></div>
+<details class="calendar-history"><summary>查看日历版本记录 · {{ data.calendar_revisions|length }} 条</summary>
+<p class="muted">包含首次记录与后续修订。核对时间表示系统何时保存该版本。</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="日历版本记录，可横向滚动"><table><thead><tr><th>事件 / 版本</th><th>当时安排</th><th>状态</th><th>出处与核对时间</th></tr></thead><tbody>
+{% for item in data.calendar_revisions %}<tr><td>{{ item.title }}<small>第 {{ item.revision }} 版</small></td><td>{{ calendar_time(item) }}</td><td>{{ calendar_status_labels.get(item.status, item.status) }}</td><td><a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">{{ source_name(item.source) }} ↗</a><small>{{ short_time(item.observed_at) }}</small></td></tr>{% else %}<tr><td colspan="4">暂无保存的日历版本。</td></tr>{% endfor %}
+</tbody></table></div></details>
+<details><summary>登记 / 修订官方事件安排</summary><form class="research-form" data-endpoint="/api/v1/research/securities/{{ selected }}/calendar">
+<label>事件标识（修改已有事件时从建议中选择）<input name="event_key" list="company-calendar-keys" required placeholder="新事件可填 2026Q3-earnings"><datalist id="company-calendar-keys">{% for event in data.calendar if event.security_id == selected %}<option value="{{ event.event_key }}">{{ event.title }} · {{ event.scheduled_date }}</option>{% endfor %}</datalist></label><label>标题<input name="title" required></label>
+<label>类型<select name="event_type"><option value="earnings">财报</option><option value="dividend">除息 / 分红</option><option value="other">其他催化</option></select></label>
+<label>公告中的日期<input name="scheduled_date" type="date" required></label><label>精确时间（含时区，可留空）<input name="scheduled_at" placeholder="2026-10-20T16:30:00-04:00"></label><label>时区<input name="timezone" value="America/New_York" required></label>
+<label>状态<select name="status"><option value="confirmed">已确认</option><option value="estimated">预计</option><option value="cancelled">已取消</option></select></label><label>官方披露 URL<input name="source_url" type="url" required></label><button class="secondary">保存日历版本</button><p role="status"></p></form></details>
+</section>
+<section class="analysis-panel" id="facts"><h2>原始披露与财务事实</h2>
+<details><summary>登记公司投资者关系页面</summary><form class="research-form" data-method="PUT" data-endpoint="/api/v1/research/securities/{{ selected }}/official-source"><label>公司 IR 页面<input name="official_ir_url" type="url" required value="{{ research.security.official_ir_url or '' }}"></label><label><input name="confirmed_company_site" type="checkbox" required>我已确认该页面属于当前公司</label><button class="secondary">保存官方来源</button><p role="status"></p></form><p class="muted">登记后，可保存同网站发布的财报、指引和事件原文。系统不自动抓取未核实的公司域名。</p></details>
+<p class="muted">保留财务期间、单位和提交版本。SEC 标准标签不保证覆盖分部、自定义口径或所有公司指引。</p>
+{% for item in data.disclosures[:12] %}<article class="social-context-post"><a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">{{ item.title }} ↗</a><p>{{ item.excerpt or '已保存出处，正文仍需打开原始文件核对。' }}</p><small>{{ item.source }} · {{ item.content_status }} · 发布 {{ item.published_at or '未知' }} · 获取 {{ item.observed_at }}</small></article>{% endfor %}
+<div class="table-scroll"><table><thead><tr><th>事实</th><th>期间</th><th>数值 / 单位</th><th>原文与可用时间</th></tr></thead><tbody>{% for fact in data.financial_facts[:24] %}<tr><td>{{ fact.concept }}</td><td>{{ fact.period_start or '' }} 至 {{ fact.period_end }}</td><td>{{ fact.value }} {{ fact.unit }}</td><td><a href="{{ fact.source_url }}" target="_blank" rel="noopener noreferrer">{{ fact.form }} {{ fact.accession }} ↗</a><small>{{ fact.available_at }}</small></td></tr>{% else %}<tr><td colspan="4">尚未获得可验证财务事实，请刷新来源或登记官方披露。</td></tr>{% endfor %}</tbody></table></div>
+<details><summary>登记 A / HK / US 官方原文</summary><form class="research-form" data-endpoint="/api/v1/research/securities/{{ selected }}/disclosures"><label>关联已有报道（可选）<select name="article_id" data-related-report><option value="">仅登记原文，不关联报道</option>{% for report in research.related_reports %}<option value="{{ report.article_id }}" data-event-id="{{ report.event_id }}">{{ report.event_title }} · {{ report.title }}</option>{% endfor %}</select></label><input type="hidden" name="event_id"><label>标题<input name="title" required></label><label>原文链接<input name="source_url" type="url" required></label><label>实际发布时间（含时区，可留空）<input name="published_at" placeholder="2026-09-16T08:00:00+08:00"></label><label>待核对的原文摘录<textarea name="excerpt" maxlength="10000"></textarea></label><button class="secondary">保存原文出处</button><p role="status"></p></form></details>
+</section>
+<section class="analysis-panel" id="expectations"><h2>发布前预期与实际值</h2>
+<p class="muted">只有发布前已保存、期间和单位一致的预期才可比较。后补数据不会冒充当时已知；提供方估计不等于纯市场一致预期。</p>
+{% for item in data.expectations %}<p>{{ item.metric }}：{{ item.value }} {{ item.unit }} · {{ '发布前已记录' if item.is_pre_release else '后获知 / 不用于发布前比较' }} · {{ item.source }} · {{ item.observed_at }}</p>{% else %}<p>暂无有效的发布前预期，不能判断是否“超预期”。</p>{% endfor %}
+<details><summary>在发布前记录预期 / 公司指引</summary><form class="research-form" data-endpoint="/api/v1/research/securities/{{ selected }}/expectations"><label>关联事件<select name="event_key" required>{% for event in data.calendar if event.security_id == selected %}<option value="{{ event.event_key }}">{{ event.title }} · {{ event.scheduled_date }}</option>{% endfor %}</select></label><label>指标<input name="metric" required placeholder="eps / revenue / 指引指标"></label><label>预期数值<input name="value" type="number" step="any" required></label><label>单位<input name="unit" required placeholder="USD/share 或 USD"></label><label>财务期间<input name="financial_period" required placeholder="2026Q3"></label><label>出处<input name="source_url" type="url" required></label><label>出处声明的预期时间（含时区，可空）<input name="expected_at"></label><button class="secondary">记录当前可知的预期</button><p role="status"></p></form></details>
+</section>
+<section class="analysis-panel" id="financial-results"><h2>季度 / TTM 与预期差</h2><p class="muted">TTM 指最近连续 12 个月；仅在相同指标、单位和实际财务期间可比时计算。</p>
+<details><summary>从官方原文确认财报实际值</summary><form class="research-form" data-endpoint="/api/v1/research/securities/{{ selected }}/actuals"><label>关联事件<select name="event_key" required>{% for event in data.calendar if event.security_id == selected %}<option value="{{ event.event_key }}">{{ event.title }}</option>{% endfor %}</select></label><label>指标<select name="metric"><option value="eps">EPS</option><option value="revenue">营收</option></select></label><label>实际数值<input name="value" type="number" step="any" required></label><label>财务期间<input name="financial_period" required placeholder="2026Q3"></label><label>原文单位<input name="unit" required placeholder="USD/share 或 USD"></label><label>实际发布时间（含时区）<input name="published_at" required></label><label>官方原文 URL<input name="source_url" type="url" required></label><button class="secondary">保存实际值与出处</button><p role="status"></p></form></details>
+{% for item in research.financial_analysis.metrics %}<article class="social-context-post"><strong>{{ item.concept }} · {{ item.unit }}</strong><p>季度：{{ item.quarter.value if item.quarter.value is not none else item.quarter.reason }} · TTM：{{ item.ttm.value if item.ttm.value is not none else item.ttm.reason }}</p><small>{{ item.source }} · 最近期间 {{ item.latest.period_start or '' }} 至 {{ item.latest.period_end }}</small></article>{% else %}<p>尚无可按期间计算的财务事实。</p>{% endfor %}
+{% for item in research.financial_analysis.surprises %}<p>{{ item.metric }} · {{ item.financial_period }}：{{ item.difference if item.difference is not none else '未知' }} {{ item.unit }} · {{ item.reason or item.status }}</p>{% endfor %}
+{% for gap in research.financial_analysis.gaps %}<p class="muted">{{ gap }}</p>{% endfor %}
+</section>
+<section class="analysis-panel"><h2>宏观实测值与采集修订</h2><p class="muted">首次采集到的旧月份数据不冒充历史发布初值；只有采集后的变更才标记为观察到修订。</p>
+<div class="table-scroll"><table><thead><tr><th>指标 / 期间</th><th>数值</th><th>版本</th><th>当时可知时间</th></tr></thead><tbody>{% for item in research.macro_vintages %}<tr><td>{{ '非农就业总量' if item.series == 'CES0000000001' else '失业率' }} · {{ item.period }}</td><td>{{ item.value }} {{ '千人' if item.unit == 'thousand_people' else '%' }}</td><td>{{ item.metadata_values.version_note }}{% if item.metadata_values.previous_value is not none %} · 前值 {{ item.metadata_values.previous_value }}{% endif %}</td><td><a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">{{ item.available_at }} ↗</a></td></tr>{% else %}<tr><td colspan="4">尚未获得官方实测值；来源状态会保留访问失败原因。</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="analysis-panel" id="market"><h2>量价与行业相对表现</h2>
+{% if market.quote %}<p>最近完整日线：{{ market.quote.price }} {{ market.quote.currency }} · {{ market.quote.as_of }} · {{ market.quote.source }}</p>{% endif %}
+{% if market.blockers %}<div class="notice">{{ market.blockers|join('；') }}</div>{% endif %}
+<div class="table-scroll"><table><thead><tr><th>实际交易日窗口</th><th>绝对收益</th><th>行业收益</th><th>行业超额</th><th>缺口</th></tr></thead><tbody>{% for h in ['1','5','20'] %}{% set row = market.horizons.get(h, {}) %}<tr><td>{{ h }} 日<br>{{ row.start_date or '—' }} 至 {{ row.end_date or '—' }}</td>{% for key in ['absolute_return_pct','industry_return_pct','industry_excess_return_pct'] %}<td>{{ '%.2f%%'|format(row[key]) if row.get(key) is not none else '未知' }}</td>{% endfor %}<td>{{ row.get('blockers',[])|join('；') }}</td></tr>{% endfor %}</tbody></table></div>
+{% if market.liquidity %}<p>20 日均量：{{ market.liquidity.average_volume_20 if market.liquidity.average_volume_20 is not none else '未知' }} {{ market.liquidity.volume_unit }} · 量比：{{ market.liquidity.volume_ratio_20 if market.liquidity.volume_ratio_20 is not none else '未知' }} · 年化波动：{{ '%.1f%%'|format(market.annualized_volatility_20_pct) if market.annualized_volatility_20_pct is not none else '未知' }}</p>{% endif %}
+<p class="muted">{{ market.calendar_note }} {{ market.pricing_note }}</p>
+</section>
+<section class="analysis-panel" id="risk"><h2>仓位与风险预算</h2><p>已自动填入起始参数，可直接使用或按需修改。已有设置优先；清空某项并保存可恢复自动填入。比例采用 0–1，例如 5% 填 0.05；成本单位为单边基点（1 基点 = 0.01%）。</p>
+{% if risk.position_review %}{% for alert in risk.position_review.alerts %}<div class="notice"><strong>{{ alert.title }}</strong><p>{{ alert.detail }}</p></div>{% endfor %}{% endif %}
+<p class="muted">标注“默认”的数值是测算假设；自动失效价随报价变化，手动修改后固定。行业仓位和交易单位取自已有资料，缺失项会单独提示。</p>
+{% set broker = research.risk_inputs.holdings_source %}
+{% if broker.active %}<p class="muted" data-holdings-note>{{ broker.note }} 账户：{{ broker.account_label }}。<a href="/watchlist#holdings-panel">更新持仓</a>；以下个人约束仍可编辑。</p>{% endif %}
+{% set portfolio = research.risk_inputs.portfolio %}{% set security_risk = research.risk_inputs.security %}
+<form class="research-form" data-method="PUT" data-endpoint="/api/v1/research/portfolio"><h3>组合</h3>{% for key,label in [('total_value','总资产'),('available_cash','可用现金')] %}<label>{{ label }}<input name="{{ key }}" type="number" step="any" min="0" value="{{ portfolio.get(key) if portfolio.get(key) is not none else '' }}" {% if broker.active %}disabled{% endif %}></label>{% endfor %}<label>资产币种<input name="currency" placeholder="USD / CNY / HKD" value="{{ portfolio.currency or '' }}" {% if broker.active %}disabled{% endif %}></label><button class="secondary" {% if broker.active %}disabled{% endif %}>保存组合</button><p role="status"></p></form>
+<form class="research-form" data-risk-defaults="true" data-method="PUT" data-endpoint="/api/v1/research/securities/{{ selected }}/risk"><h3>当前标的</h3>
+{% set field_sources = research.risk_inputs.field_sources %}
+{% for key,label in [('current_weight','当前持仓比例'),('current_quantity','实际持股数量'),('average_cost','平均成本'),('max_weight','单股仓位上限'),('risk_budget_pct','该股最大损失占组合比例'),('stop_price','判断失效价格'),('sector_limit_pct','行业仓位上限'),('sector_current_weight','当前全组合行业仓位'),('lot_size','每手股数'),('max_participation_pct','最多占日均成交量比例'),('fee_bps','单边手续费基点'),('slippage_bps','单边滑点基点')] %}
+{% set readonly = broker.active and key in ['current_weight', 'current_quantity', 'average_cost'] %}
+<label>{{ label }}<input name="{{ key }}" type="number" step="any" min="0" value="{{ ('%.6g'|format(security_risk[key]) if readonly else security_risk[key]) if security_risk.get(key) is not none else '' }}" aria-describedby="risk-note-{{ key }}" {% if readonly %}disabled{% endif %}><small class="muted" id="risk-note-{{ key }}" data-source="{{ field_sources[key].kind }}">{{ field_sources[key].note }}</small></label>
+{% endfor %}
+{% for key,label,placeholder in [('benchmark_market','行业基准市场','US / A / HK'),('benchmark_symbol','行业基准代码','自动匹配行业，可修改'),('benchmark_currency','行业基准币种','USD / CNY / HKD'),('benchmark_label','选择该基准的理由','例如主营业务对应行业 ETF')] %}
+<label>{{ label }}<input name="{{ key }}" value="{{ security_risk.get(key) or '' }}" placeholder="{{ placeholder }}" aria-describedby="risk-note-{{ key }}"><small class="muted" id="risk-note-{{ key }}" data-source="{{ field_sources[key].kind }}">{{ field_sources[key].note }}</small></label>
+{% endfor %}<button class="secondary">保存修改</button><p role="status"></p></form>
+{% if risk.blockers %}<details open><summary>数量测算还缺什么</summary><ul>{% for blocker in risk.blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></details>{% else %}<div class="metric-grid"><div class="metric"><span>新增股数上限</span><strong>{{ risk.max_buy_quantity }}</strong></div><div class="metric"><span>需减少股数</span><strong>{{ risk.required_reduce_quantity }}</strong></div></div>{% endif %}<p class="muted">{{ risk.note }}</p>
+</section>
+<section class="analysis-panel" id="coverage"><h2>来源覆盖与可用权限</h2>
+<p>{% for status,label in source_status_labels.items() %}{% set count = data.source_health|selectattr('status','equalto',status)|list|length %}{% if count %}<span class="calibration-stat">{{ label }} {{ count }} 项</span>{% endif %}{% endfor %}</p>
+{% if research.refresh_schedule.enabled %}<p class="muted">自动刷新已开启，每 {{ research.refresh_schedule.interval_hours }} 小时检查一次；下次计划：{{ short_time(research.refresh_schedule.next_run_at) }}。任务冲突时会稍后重试。</p>{% else %}<p class="notice">自动刷新未开启。可使用页面顶部的“刷新已有与官方来源”更新资料。</p>{% endif %}
+<p class="muted">“待刷新”表示已到重新核对时间；历史资料仍保留。“访问受限”表示请求被来源拒绝，需核对具体原因。</p>
+{% for source in data.source_health %}<article class="impact-row"><div><strong title="{{ source.source_key }}">{{ source_name(source.source_key) }} · {{ source_status_labels.get(source.status, source.status) }}</strong><p>{{ source.message }}</p></div><small>最近尝试：{{ short_time(source.last_attempt_at) }}<br>最近成功：{{ short_time(source.last_success_at) }}<br>覆盖范围：{{ {'partial': '部分覆盖', 'unavailable': '暂无可用数据', 'unknown': '尚未核对', 'full': '完整覆盖'}.get(source.coverage, source.coverage) }}</small></article>{% endfor %}
+{% for gap in data.coverage_gaps if gap.source in ['financial_facts', 'company_calendar'] %}<p class="notice">{{ gap.message }}</p>{% endfor %}<p>覆盖范围按实际返回资料记录；可从官方原文补充尚未覆盖的资料。</p></section>
+{% endif %}
+<section class="analysis-panel" id="claims">
+<form class="filters" method="get" action="/research#claims">
+{% if selected %}<input type="hidden" name="security_id" value="{{ selected }}">{% endif %}
+<label>主张范围<select name="claims_scope"><option value="security"{% if claims_scope == 'security' %} selected{% endif %}>当前证券</option><option value="all"{% if claims_scope == 'all' %} selected{% endif %}>全部证券</option></select></label>
+<label>已保存状态 / 期限<select name="claim_status"><option value="">全部</option>{% for value,label in [('pending','待核实'),('partially_supported','部分有依据'),('verified','已人工核实'),('refuted','已被反证'),('expired','已过期')] %}<option value="{{ value }}"{% if claim_status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button class="secondary">筛选主张</button></form>
+<p class="muted">每页最多 20 条，按保存顺序倒序。最近核验记录随列表展示，完整历史展开后读取。</p>
+{{ claims_panel(all_claims) }}
+<div class="actions"><a href="{{ claims_first_url }}">回到第一页</a>{% if claims_next_url %}<a href="{{ claims_next_url }}">下一页 →</a>{% endif %}</div>
+</section>
+<section class="analysis-panel" id="calibration"><h2>按版本验证行动结果</h2><p>未来结果达到对应交易日后才纳入。无足够样本时保留“未知”，模型置信度不显示为胜率。</p><div id="calibration-content"></div><script type="application/json" id="calibration-data">{{ calibration|tojson }}</script><a href="/metrics">查看原信号验证对照 →</a></section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/research.js?v={{ asset_version }}" defer></script>{% endblock %}

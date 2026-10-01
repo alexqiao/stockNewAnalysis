@@ -1,0 +1,36 @@
+<section class="analysis-panel" id="holdings-panel" data-broker-active="{{ 'true' if holdings.active else 'false' }}">
+  <h2>真实持仓</h2>
+  <p>从本机 TWS / IB Gateway 只读同步一个实盘账户。成功同步后会保存并持续使用该次持仓，发生交易或资金变化后可手动更新。</p>
+  <div class="holdings-connect">
+    <label>连接配置<select id="ibkr-preset"><option value="7496">TWS 实盘</option><option value="4001">IB Gateway 实盘</option><option value="custom">自定义端口</option></select></label>
+    <label>端口<input id="ibkr-port" type="number" min="1" max="65535" value="7496"></label>
+    <label>Client ID<input id="ibkr-client-id" type="number" min="1" value="72"></label>
+    <button type="button" id="ibkr-connect" class="secondary">读取账户</button>
+    <label>实盘账户<select id="ibkr-account" {% if not holdings.active %}disabled{% endif %}>{% if holdings.active %}<option value="{{ holdings.account_key }}">{{ holdings.account_label }}</option>{% else %}<option value="">请先读取账户</option>{% endif %}</select></label>
+    <button type="button" id="ibkr-sync" {% if not holdings.active %}disabled{% endif %}>同步真实持仓</button>
+  </div>
+  <p class="muted">请保持 TWS 已登录、Socket API 已启用，并在 TWS 设置中勾选 Read-Only API。Client ID 需与其他应用不同。</p>
+  <p id="ibkr-message" role="status" aria-live="polite"></p>
+  {% if holdings.active %}
+  <p><strong>{{ holdings.account_label }}</strong> · 最近成功同步：{{ holdings.captured_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC</p>
+  <p class="muted" data-holdings-note>{{ holdings.note }}</p>
+  <div class="metric-grid">
+    {% for key,label in [('total_value','账户净值'),('cash_balance','现金余额'),('settled_cash','已结算现金'),('available_funds','券商可用资金'),('available_cash','非融资资金上限')] %}
+    <div class="metric"><span>{{ label }}</span><strong>{{ '%.2f'|format(holdings.portfolio[key]) if holdings.portfolio[key] is not none else '未知' }}</strong><small>{{ holdings.portfolio.currency or '币种未知' }}</small></div>
+    {% endfor %}
+  </div>
+  <p class="muted">非融资资金上限取已结算现金与券商可用资金的较小值，下限为零。资产金额按账户基础币种展示，持仓金额按各自币种展示。</p>
+  {% if holdings.blockers %}<p class="notice">{{ holdings.blockers|join('；') }}</p>{% endif %}
+  <div class="table-scroll"><table><thead><tr><th>证券 / 类型</th><th>持仓数量</th><th>平均成本</th><th>市价</th><th>市值</th><th>未实现盈亏</th><th>净值占比</th><th>币种 / 状态</th></tr></thead><tbody>
+    {% for item in holdings.positions %}<tr>
+      <td>{% if item.security_id %}<a href="/securities/{{ item.security_id }}">{{ item.symbol }}</a>{% else %}{{ item.symbol }}{% endif %}<br><small>{{ item.name or item.security_type }} · {{ item.security_type }}</small></td>
+      <td>{{ '%g'|format(item.quantity) }}</td>
+      {% for key in ['average_cost','market_price','market_value','unrealized_pnl'] %}<td>{{ '%.2f'|format(item[key]) if item[key] is not none else '未知' }}</td>{% endfor %}
+      <td>{{ '%.2f%%'|format(item.weight * 100) if item.weight is not none else '未知' }}</td>
+      <td>{{ item.currency }}<br><small>{{ item.unsupported_reason or ('空头：暂不进行多头数量测算' if item.holding_status == 'short' else '已接入') }}</small></td>
+    </tr>{% else %}<tr><td colspan="8">该账户在此快照中无持仓。</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% if holdings.data_gaps %}<details><summary>数据缺口（{{ holdings.data_gaps|length }}）</summary><ul>{% for gap in holdings.data_gaps %}<li>{{ gap }}</li>{% endfor %}</ul></details>{% endif %}
+  {% else %}<p class="muted">尚未同步实盘账户，当前持仓数据仍由手动填写。</p>{% endif %}
+  {% if holdings.last_sync and holdings.last_sync.status == 'failed' %}<p class="notice">最近同步失败：{{ holdings.last_sync.error }}。此前数据保留。</p>{% endif %}
+</section>

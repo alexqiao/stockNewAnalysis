@@ -4,18 +4,29 @@
 <section class="detail">
   <p class="eyebrow">{{ event.event_type or "待分类" }} · {{ event.occurred_at or event.updated_at }}</p>
   <div class="panel-heading"><h1>{{ event.title }}</h1><button id="reanalyze" class="secondary" data-event-id="{{ event.id }}">重新分析</button></div>
+  <p id="reanalyze-message" role="status" aria-live="polite"></p>
+  {% if event.analysis_stale %}<p class="notice">依据已变化：{{ event.analysis_stale_reason }}。旧分析已停止参与当前判断；核对后可点击“重新分析”。</p>{% endif %}
   <p class="lead">{{ event.summary }}</p>
+  <p>分析状态：{{ {'pending': '等待分析', 'analyzing': '分析中', 'complete': '已完成', 'partial': '部分完成', 'error': '分析失败', 'stale': '依据已变化，待重评', 'excluded': '已排除（无有效证据）', 'unavailable': '模型暂不可用'}.get(event.status, event.status) }} · 本轮已尝试 {{ event.analysis_attempts }} 次{% if event.analysis_next_retry_at %} · 下次重试：{{ event.analysis_next_retry_at }}{% endif %}</p>
+  {% if event.error %}<p class="notice">{{ event.error }}</p>{% endif %}
   <div class="signals"><span class="tag">需求：{{ event.demand_status }}</span><span class="tag">证据：{{ event.evidence_grade }} · {{ "%.1f"|format(event.evidence_score) }}/5</span></div>
+  <p class="muted">报道 {{ event.evidence_counts.reports }} 条 · 发布者 {{ event.evidence_counts.report_sources }} · 已确认原始依据 {{ event.evidence_counts.original_sources }} · 原始归属未核实 {{ event.evidence_counts.unknown_original_sources }}</p>
   <h3>已发生的需求变化</h3><p>{{ event.observed_demand or "尚未形成可靠判断。" }}</p>
   {% if event.missing_proof %}<h3>下一步需要验证</h3><ul>{% for item in event.missing_proof %}<li>{{ item }}</li>{% endfor %}</ul>{% endif %}
   <div class="signals">{% for theme in event.themes %}<a class="tag" href="/themes/{{ theme.id }}">{{ theme.name }}</a>{% endfor %}</div>
 </section>
+<section id="event-timing" class="analysis-panel"><h2>首次披露与财务期间</h2>
+<p>报道时间：{{ event.occurred_at or '未知' }} · 事实首次披露：{{ event.first_disclosed_at or '待核实' }} · 财务期间：{{ event.financial_period or '待核实 / 不适用' }}</p>
+{% if event.fact_source_url %}<a href="{{ event.fact_source_url }}" target="_blank" rel="noopener noreferrer">已核对的原始出处 ↗</a>{% endif %}
+<details><summary>核对原文并确认首次披露时间</summary><p class="muted">旧事实重发不能重新启动短期催化窗口。只能确认原文已发生的首次披露时间；新增事实应另记事件。</p>
+<form class="research-form" data-endpoint="/api/v1/research/events/{{ event.id }}/timing" data-method="PUT"><label>首次披露（含时区）<input name="first_disclosed_at" required placeholder="2026-09-16T08:00:00-04:00"></label><label>财务期间（如 2026Q2）<input name="financial_period" value="{{ event.financial_period or '' }}"></label><label>原始披露 URL<input name="source_url" type="url" required value="{{ event.fact_source_url or '' }}"></label><label>核验备注<textarea name="note" required></textarea></label><button class="secondary">确认并重新计算事件有效期</button><p role="status"></p></form></details></section>
 <section class="analysis-panel">
   <h2>高弹性候选</h2>
   {% for impact in event.impacts %}
   <article class="candidate-card">
     <div class="panel-heading"><h3><a href="/securities/{{ impact.security.id }}">{{ impact.security.name }} · {{ impact.security.symbol }}</a></h3><span class="score compact">{{ "%.1f"|format(impact.opportunity_score) }}</span></div>
     <p>{{ impact.thesis }}</p>
+    {% if impact.research_inputs %}<details><summary>本次分析使用的输入</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ impact.research_inputs|tojson(indent=2) }}</pre></details>{% endif %}
     <dl class="research-grid">
       <div><dt>需求确定性</dt><dd>{{ impact.dimensions.demand_certainty }}/5</dd></div>
       <div><dt>传导清晰度</dt><dd>{{ impact.dimensions.transmission_clarity }}/5</dd></div>
@@ -26,14 +37,29 @@
   </article>
   {% else %}<div class="empty">尚无与证券主数据唯一匹配的候选。</div>{% endfor %}
 </section>
+{% if event.analysis_history %}<section class="analysis-panel"><details><summary>历史分析（已退出当前判断）</summary>{% for item in event.analysis_history %}<article><h3>{{ item.security.symbol }} · {{ item.created_at }}</h3><p>{{ item.thesis }}</p><p class="muted">证据版本 {{ item.evidence_version if item.evidence_version is not none else '历史未记录' }} · {{ item.evidence_rule_version }}</p>{% if item.research_inputs %}<details><summary>当时使用的研究输入</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ item.research_inputs|tojson(indent=2) }}</pre></details>{% else %}<p class="muted">该历史结果未记录研究输入。</p>{% endif %}</article>{% endfor %}</details></section>{% endif %}
 {% if event.unresolved_candidates %}<section class="analysis-panel"><h2>待核实候选</h2><p class="muted">以下公司未能与证券主数据唯一匹配，不参与排名。</p><ul>{% for item in event.unresolved_candidates %}<li>{{ item.name }}{% if item.symbol %} · {{ item.symbol }}{% endif %}：{{ item.supply_chain_role }}</li>{% endfor %}</ul></section>{% endif %}
 <section class="analysis-panel"><h2>事实证据</h2><ul>{% for article in event.articles if article.content_kind != "social_post" and article.analysis_eligible %}<li><a href="/news/{{ article.id }}">{{ article.title }}</a> · {{ article.source }}</li>{% else %}<li class="muted">暂无非社交事实来源。</li>{% endfor %}</ul></section>
 <section class="analysis-panel"><h2>博主观点与线索</h2><p class="muted">个人博主内容默认不增加事实证据质量。</p>{% for post in event.x_posts %}<article class="social-post"><div class="meta"><span>@{{ post.account.handle }} · {{ post.screening.classification or "待分类" }}</span><span>{{ post.published_at }}</span></div><p>{{ post.text or "（无文字，仅媒体）" }}</p>{% if post.quoted_text %}<blockquote>引用 @{{ post.quoted_author_handle }}：{{ post.quoted_text }}</blockquote>{% endif %}<a class="external" href="{{ post.url }}" target="_blank" rel="noopener noreferrer">查看原帖 ↗</a></article>{% else %}<div class="empty">暂无关联博主内容。</div>{% endfor %}</section>
 {% endblock %}
-{% block scripts %}<script>
+{% block scripts %}<script src="/static/research.js?v={{ asset_version }}" defer></script><script>
 document.getElementById('reanalyze').addEventListener('click', async function () {
+  if (this.disabled) return;
   this.disabled = true;
-  const response = await fetch('/api/v1/events/' + this.dataset.eventId + '/analyses', {method: 'POST'});
-  this.textContent = response.ok ? '已排队' : '失败';
+  const message = document.getElementById('reanalyze-message');
+  message.textContent = '正在提交分析…';
+  let queued = false;
+  try {
+    const response = await fetch('/api/v1/events/' + this.dataset.eventId + '/analyses', {method: 'POST'});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+    queued = true;
+    this.textContent = '已排队';
+    message.textContent = '分析已排队，完成后刷新页面查看。';
+  } catch (error) {
+    message.textContent = '未启动分析：' + error.message;
+  } finally {
+    if (!queued) this.disabled = false;
+  }
 });
 </script>{% endblock %}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -136,9 +137,12 @@ def test_ambiguous_ticker_rejected_even_when_other_market_is_not_requested(
     assert context["posts"][0]["post_id"] == "302"
 
 
-def test_theme_and_event_context_do_not_inherit_post_direction(session: Session) -> None:
+@pytest.mark.parametrize("event_status", ["complete", "partial"])
+def test_theme_and_event_context_do_not_inherit_post_direction(
+    session: Session, event_status: str,
+) -> None:
     apple = security(session)
-    event = Event(event_key="social-theme", title="供应链事件", status="complete")
+    event = Event(event_key="social-theme", title="供应链事件", status=event_status)
     theme = Theme(slug="supply-chain", name="供应链")
     session.add_all([event, theme])
     session.flush()

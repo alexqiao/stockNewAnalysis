@@ -48,6 +48,83 @@ SCREENING = {
 }
 
 
+@pytest.mark.parametrize("decision", ["ignore", "context", "promote"])
+@pytest.mark.parametrize("model_fails", [False, True])
+def test_manual_decision_during_screening_wins_atomically(
+    session_factory: SessionFactory, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+    decision: str, model_fails: bool,
+) -> None:
+    from trade_news_analysis.schemas import XPostScreeningPayload
+
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("99001")]))
+    with session_factory() as session:
+        account = session.scalar(select(XAccount).where(XAccount.handle == DEFAULT_X_ACCOUNTS[0]))
+        assert account is not None
+        account.account_type = "company"
+        session.commit()
+    service.execute(screen_posts=False)
+    saved: dict[str, object] = {}
+
+    def screen(post: XPost, _account: XAccount) -> XPostScreeningPayload:
+        # This second connection must be able to write while the model is waiting.
+        with session_factory() as session:
+            service.apply_decision(session, post.id, decision)
+            session.commit()
+            current = session.get(XPost, post.id)
+            assert current is not None
+            saved.update({
+                "status": current.screening_status,
+                "article": current.promoted_article_id,
+                "event": current.related_event_id,
+            })
+        if model_fails:
+            raise TimeoutError("model unavailable")
+        return XPostScreeningPayload.model_validate(SCREENING)
+
+    monkeypatch.setattr(service.screener, "screen", screen)
+    assert service.screen_pending() == set()
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "99001"))
+        assert post is not None
+        assert post.screening_status == saved["status"] == (
+            "promoted" if decision == "promote" else decision
+        )
+        assert post.promoted_article_id == saved["article"]
+        assert post.related_event_id == saved["event"]
+        assert "error" not in post.screening
+        assert session.scalar(select(func.count()).select_from(Article)) == (
+            1 if decision == "promote" else 0
+        )
+
+
+def test_changed_post_discards_outdated_screening_result(
+    session_factory: SessionFactory, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trade_news_analysis.schemas import XPostScreeningPayload
+
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("99002")]))
+    service.execute(screen_posts=False)
+
+    def screen(post: XPost, _account: XAccount) -> XPostScreeningPayload:
+        with session_factory() as session:
+            account = session.get(XAccount, post.account_id)
+            assert account is not None
+            changed = browser_post("99002")
+            changed.text = "Corrected source text"
+            service._upsert_post(session, account, changed)
+            session.commit()
+        return XPostScreeningPayload.model_validate(SCREENING)
+
+    monkeypatch.setattr(service.screener, "screen", screen)
+    assert service.screen_pending() == set()
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "99002"))
+        assert post is not None
+        assert post.text == "Corrected source text"
+        assert post.screening_status == "pending"
+        assert post.screening == {}
+
+
 class FakeFetcher:
     def __init__(self, posts: list[BrowserPost]):
         self.posts = posts
@@ -390,6 +467,35 @@ def test_trusted_account_auto_promotes_and_manual_retraction_excludes_event(
         event = session.get(Event, event_id)
         assert event is not None
         assert event.status == "excluded"
+
+
+def test_changed_promoted_post_requires_review_and_repromotion_uses_current_text(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    service = x_service(session_factory, settings, FakeFetcher([browser_post("2002")]))
+    service.execute(screen_posts=False)
+    with session_factory() as session:
+        post = session.scalar(select(XPost).where(XPost.post_id == "2002"))
+        assert post is not None
+        event_id = service.apply_decision(session, post.id, "promote")
+        session.commit()
+        article = session.get(Article, post.promoted_article_id)
+        assert article is not None and article.analysis_eligible
+        previous_event = session.get(Event, event_id)
+        assert previous_event is not None
+        previous_version = previous_event.evidence_version
+        changed = browser_post("2002")
+        changed.text = "Corrected official text after publication"
+        service._upsert_post(session, post.account, changed)
+        session.commit()
+        event = session.get(Event, event_id)
+        assert event is not None and event.status == "excluded"
+        assert event.evidence_version > previous_version
+        assert not article.analysis_eligible
+        service.apply_decision(session, post.id, "promote")
+        session.commit()
+        assert article.analysis_eligible
+        assert article.summary == changed.text
 
 
 def test_independent_evidence_count_excludes_personal_social_leads(

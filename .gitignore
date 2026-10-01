@@ -9,8 +9,15 @@ __pycache__/
 htmlcov/
 data/*.db
 data/*.db-*
+data/backups/
+data/**/*.db
+data/**/*.db-*
+data/**/*.bak
+data/*.bak
 data/telegram_update_offset*
 data/x-browser-profile/
 dist/
 build/
 *.egg-info/
+.DS_Store
+test-results/

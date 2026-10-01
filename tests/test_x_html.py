@@ -2,11 +2,39 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from trade_news_analysis.services.x_html import parse_public_profile
+from trade_news_analysis.services.x_html import (
+    XProfileUnavailableError,
+    check_profile_availability,
+    parse_public_profile,
+)
 
 POST_ID = "1855961006029328823"
 QUOTE_ID = "1855900006029328823"
 BODY_CLASS = "font-chirp whitespace-pre-wrap text-text text-body font-normal"
+
+
+@pytest.mark.parametrize("message", ["Account suspended", "账号已被冻结", "帳戶已停用"])
+def test_suspended_profile_reports_explicit_account_state(message: str) -> None:
+    with pytest.raises(XProfileUnavailableError, match="账号已停用"):
+        parse_public_profile(f"<main><h2>{message}</h2></main>", "alice")
+
+
+@pytest.mark.parametrize("html", [
+    "<article><h2>Account suspended</h2></article>",
+    "<article><article><h2>Account suspended</h2></article></article>",
+    "<script><h2>Account suspended</h2></script>",
+    "<main><p>Account suspended</p></main>",
+])
+def test_post_text_and_scripts_do_not_determine_account_state(html: str) -> None:
+    check_profile_availability(html)
+    with pytest.raises(ValueError) as caught:
+        parse_public_profile(html, "alice")
+    assert not isinstance(caught.value, XProfileUnavailableError)
+
+
+def test_post_discussing_suspension_is_still_collected() -> None:
+    posts = parse_public_profile(article("Account suspended"), "alice")
+    assert posts[0]["text"] == "Account suspended"
 
 
 def article(body: str = "原帖正文", handle: str = "alice", post_id: str = POST_ID) -> str:

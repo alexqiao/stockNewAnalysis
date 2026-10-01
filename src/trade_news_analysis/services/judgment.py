@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import Any
 
+from .action_plan import build_action_plan
 from .scoring import trading_sessions_since
 
-ACTION_POLICY_VERSION = "2026-09-15.v1"
+ACTION_POLICY_VERSION = "2026-09-16.v2"
 MIN_ACTION_CONFIDENCE = 0.5
 MIN_ACTION_SCORE = 20.0
 MAX_ACTION_CONFLICT = 0.35
@@ -260,6 +261,72 @@ def _valuation_blockers(pe_summary: Mapping[str, Any], now: datetime) -> list[st
     return blockers
 
 
+def _pending_action_explanation(
+    holding_status: str,
+    signal: Mapping[str, Any] | None,
+    pe_summary: Mapping[str, Any],
+    signal_blockers: list[str],
+    valuation_blockers: list[str],
+    now: datetime,
+) -> tuple[str, str]:
+    """Explain the first resolvable gap while keeping every gate unchanged."""
+    price_issues = []
+    if _number(pe_summary.get("current_price")) <= 0:
+        price_issues.append("缺少有效当前报价")
+    price_freshness = _freshness_issue(
+        pe_summary.get("price_as_of"), now, PRICE_MAX_AGE_WORKDAYS, "报价"
+    )
+    if price_freshness:
+        price_issues.append(price_freshness)
+    if (
+        pe_summary.get("price_provenance") != "manual"
+        and pe_summary.get("source_status") == "error"
+    ):
+        price_issues.append("自动报价来源最近刷新失败")
+    if price_issues:
+        return "先更新报价", (
+            f"{'；'.join(price_issues)}。确认最新价格后再判断是否调整仓位；"
+            "报价缺口本身不构成卖出理由。"
+        )
+
+    if signal is None:
+        return "等待可验证催化", (
+            "当前没有可用的个股新闻信号，需补充与公司收入、成本或风险直接相关的事件证据。"
+        )
+    signal_freshness = _freshness_issue(
+        signal.get("as_of"), now, SIGNAL_MAX_AGE_WORKDAYS, "新闻信号"
+    )
+    if signal_freshness:
+        return "补当前事件依据", (
+            f"{signal_freshness}。重新采集并计算当前事件影响后，再判断原有方向是否仍成立。"
+        )
+    if not signal.get("evidence_event_ids"):
+        return "等待可验证催化", (
+            "最新信号缺少仍有效的事件依据，需确认具体催化及原始来源后再评估仓位变化。"
+        )
+    if MAX_ACTION_CONFLICT <= _number(signal.get("conflict")) <= 1:
+        pause = "加仓" if holding_status == "long" else "建仓"
+        return "先核对分歧", (
+            f"当前有效事件的多空冲突度为 {_number(signal.get('conflict')):.0%}，"
+            f"已达到 35% 的暂停门槛；先核对相互矛盾的证据，暂缓{pause}。"
+        )
+    if valuation_blockers:
+        return "补合适估值依据", (
+            f"{'；'.join(valuation_blockers)}。补齐可用于当前公司的盈利与估值依据，"
+            "是否已经计价还需核对市场预期及事件前后行情。"
+        )
+    if pe_summary.get("valuation_status") == "above_range":
+        return "核对估值是否透支", (
+            "当前报价高于 PE 假设区间上沿，需验证盈利能否支撑现价；"
+            "先核对估值假设及催化兑现情况。"
+        )
+    pause = "加仓" if holding_status == "long" else "建仓"
+    return f"暂缓{pause}，等待明确催化", (
+        f"{'；'.join(signal_blockers) or '当前行动条件尚未全部满足'}。"
+        "等待可验证事件形成足够明确的方向，再评估仓位变化。"
+    )
+
+
 def _action_scenario(
     holding_status: str,
     signal: Mapping[str, Any] | None,
@@ -273,10 +340,10 @@ def _action_scenario(
     direction = signal.get("direction") if signal else None
     blockers = signal_blockers + valuation_blockers
     next_steps: list[str] = []
-    code, label, reason = "wait", "等待", "行动条件尚未满足，先处理证据和数据缺口。"
-    if holding_status == "long":
-        code, label = "review", "复核持仓"
-        reason = "现有信息不足以支持继续持有或退出，先复核持仓依据。"
+    code = "review" if holding_status == "long" else "wait"
+    label, reason = _pending_action_explanation(
+        holding_status, signal, pe_summary, signal_blockers, valuation_blockers, now
+    )
 
     if not signal_blockers and direction == "bearish":
         blockers = []
@@ -294,7 +361,6 @@ def _action_scenario(
     elif not blockers and direction == "bullish":
         if valuation == "above_range":
             blockers.append("当前报价高于 PE 假设区间，新闻利好缺少估值缓冲")
-            reason = "利好与偏高估值相互制约，先复核盈利假设和预期是否透支。"
         elif holding_status == "long":
             code, label = "hold", "持有观察"
             reason = "已有持仓，新闻达到正向门槛且估值未超出假设区间，继续验证催化兑现。"
@@ -308,6 +374,7 @@ def _action_scenario(
                 and not _signal_blockers(other, now)
             ]
             if opposing_horizons:
+                label = "等待周期方向一致"
                 blockers.append(
                     f"其他周期（{'、'.join(opposing_horizons)} 日）出现有效强负面信号，暂缓新增仓位"
                 )
@@ -334,12 +401,22 @@ def _build_action(
     signals_by_horizon: Mapping[Any, Any] | None,
     social_context: Mapping[str, Any] | None,
     now: datetime,
+    event_checks: Sequence[Mapping[str, Any]],
+    horizon: int,
 ) -> dict[str, Any]:
     scenarios = {
         state: _action_scenario(state, signal, pe_summary, signals_by_horizon, now)
         for state in ("flat", "long")
     }
-    if holding_status in scenarios:
+    action: dict[str, Any]
+    if holding_status == "short":
+        action = {
+            "code": "review", "label": "复核空头持仓",
+            "reason": "真实持仓为空头；当前行动规则仅适用于股票多头。",
+            "blockers": ["空头持仓不适用当前多头行动规则"],
+            "next_steps": ["核对券商空头持仓及保证金要求"], "holding_status": "short",
+        }
+    elif holding_status in scenarios:
         action = dict(scenarios[holding_status])
     else:
         holding_status = "unknown"
@@ -376,6 +453,9 @@ def _build_action(
         "policy_version": ACTION_POLICY_VERSION,
         "policy_note": ACTION_POLICY_NOTE,
         "as_of": now,
+        "plan": build_action_plan(
+            action, signal, event_checks, social_context, horizon=horizon, now=now
+        ),
     }
 
 
@@ -389,6 +469,8 @@ def build_watchlist_judgment(
     signals_by_horizon: Mapping[Any, Any] | None = None,
     social_context: Mapping[str, Any] | None = None,
     now: datetime | None = None,
+    event_checks: Sequence[Mapping[str, Any]] = (),
+    horizon: int | None = None,
 ) -> dict[str, Any]:
     """Return a concise synthesis without adding an LLM call to page rendering."""
     news_state = _news_state(signal)
@@ -419,7 +501,9 @@ def build_watchlist_judgment(
             "neutral": "方向不明，PE 估值待补",
             "unavailable": "新闻与估值数据不足",
         }.get(news_state, "证据冲突，PE 估值待补")
-        conclusion = "先补齐盈利预测和 PE 区间，再判断新闻催化是否已反映在价格中"
+        conclusion = (
+            "年度估值依据待补；是否已经计价还需市场预期和事件前后行情，当前尚未验证"
+        )
 
     news_detail = _news_detail(signal, news_state)
     valuation_detail = _valuation_detail(pe_summary)
@@ -443,5 +527,7 @@ def build_watchlist_judgment(
             signals_by_horizon,
             social_context,
             _timestamp(now) or datetime.now(UTC),
+            event_checks,
+            horizon or int((signal or {}).get("horizon") or 5),
         ),
     }

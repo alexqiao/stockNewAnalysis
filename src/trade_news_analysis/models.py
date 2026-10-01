@@ -46,6 +46,7 @@ class Article(Base):
     evidence_role: Mapped[str] = mapped_column(String(30), default="reporting", index=True)
     author_handle: Mapped[str | None] = mapped_column(String(64), index=True)
     analysis_eligible: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    original_source_url: Mapped[str | None] = mapped_column(Text)
 
     event_links: Mapped[list[EventArticle]] = relationship(
         back_populates="article", cascade="all, delete-orphan"
@@ -108,11 +109,25 @@ class Event(Base):
     missing_proof: Mapped[list[str]] = mapped_column(JSON, default=list)
     unresolved_candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    first_disclosed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fact_time_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    financial_period: Mapped[str | None] = mapped_column(String(80))
+    fact_source_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     model: Mapped[str] = mapped_column(String(120), default="")
     raw_response: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+
+    analysis_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    analysis_stage: Mapped[str] = mapped_column(
+        String(20), default="discovery", server_default="discovery"
+    )
+    analysis_next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    analyzed_evidence_version: Mapped[int | None] = mapped_column(Integer)
+    analysis_stale: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    analysis_stale_reason: Mapped[str | None] = mapped_column(Text)
 
     article_links: Mapped[list[EventArticle]] = relationship(
         back_populates="event", cascade="all, delete-orphan"
@@ -202,6 +217,12 @@ class EventSecurityImpact(Base):
     evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
     raw_response: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    evidence_version: Mapped[int | None] = mapped_column(Integer)
+    research_inputs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evidence_rule_version: Mapped[str] = mapped_column(
+        String(40), default="original-sources-v2", server_default="legacy-v1"
+    )
 
     event: Mapped[Event] = relationship(back_populates="impacts")
     security: Mapped[Security] = relationship(back_populates="impacts")
@@ -277,6 +298,9 @@ class SignalOutcome(Base):
     actual_direction: Mapped[str] = mapped_column(String(10))
     correct: Mapped[bool] = mapped_column(Boolean)
     limit_up_hit: Mapped[bool | None] = mapped_column(Boolean)
+    evaluation_version: Mapped[str] = mapped_column(
+        String(40), default="legacy-v1", server_default="legacy-v1"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     snapshot: Mapped[SecuritySignalSnapshot] = relationship(back_populates="outcome")
@@ -341,6 +365,12 @@ class IngestionRun(Base):
     articles_new: Mapped[int] = mapped_column(Integer, default=0)
     analyses_created: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    phase: Mapped[str] = mapped_column(String(32), default="queued", server_default="queued")
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in {"complete", "completed", "partial", "failed"}
 
 
 class SourceHealth(Base):
@@ -400,6 +430,7 @@ class XPost(Base):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     screening_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    screening_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     screening: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     promoted_article_id: Mapped[int | None] = mapped_column(
         ForeignKey("articles.id", ondelete="SET NULL"), unique=True, index=True

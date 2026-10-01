@@ -1,5 +1,158 @@
 # 项目优化计划
 
+## 2026-10-01 均衡优化实施
+
+本轮继续使用本地单用户、单 worker。新增事实或反证只使已有分析失效，用户核对后点击重评；
+普通行情更新只重算量价和风险。持仓继续使用上次成功快照并显示时间，不因后续同步失败或超过24小时单独阻断。
+
+最终验收：`CI_REQUIRE_BROWSER=1` 下 **1056 项离线测试通过**，无跳过；2 项联网测试按范围未运行。
+实际 Chrome 交互、失败现场采集及迁移升级/降级回归均执行。Ruff、Mypy（66 个源文件）和
+`git diff --check` 通过。43 条告警来自依赖弃用提示；远程 CI 尚未触发。
+
+| 范围 | 实现 | 核心回归 |
+| --- | --- | --- |
+| 依据与分析 | 证据版本原子检查、实际输入保存及提交前再校验；无有效证据排除；正文修订使旧结果退出判断 | 撤回/新增/研究变化与模型并发、初次分析尚无历史关联、同URL正文修订 |
+| 后台与来源 | 协调器管理最终状态及阶段；来源事务失败回滚后继续；成功提交才计数 | 采集后仍运行、阶段失败、来源A失败B成功、重启恢复 |
+| 行情与审计 | 日期区间共享仓库，满足口径时用缓存；修订保留旧值；缓存更新后后台确定性重算 | 旧历史、无网缓存、同轮来源修订、版本与实际窗口一致 |
+| 验证队列 | 每批最多500条到期行动，持久化缺口和退避；股票及基准实际窗口保存 | 未成熟不抓行情、缺失不顺延、限批、幂等与手动重试 |
+| 编辑与查询 | revision冲突409、草稿保留、局部更新、主张分页及按需历史、串行可恢复轮询 | 双标签页、后台旧对象、断网/500/延迟、重复点击、Chrome交互 |
+| 研究质量 | 关键财务类别优先、原始披露明确关联与去重、真实交易所复核期限 | 大量科目、同原文转述、未知独立性、长假/半日市、人工期限 |
+| 交付基线 | 写入前检查数据库结构及版本；健康区分当前/历史；CI浏览器跳过判失败并留现场 | 旧库停止启动、迁移往返、过期来源、CI skip门禁与trace |
+
+迁移头为 `e83f20a7b691`，基于 `d46b7c90a125`。迁移仅补字段与新表，旧行动/结果不改写；
+历史任务原期限保留并视为人工期限。旧分析不伪造输入摘要；首次刷新用刷新前后事实差异检查旧分析。
+新证据计数 `original-sources-v2`、新信号验证 `strict-sessions-v3`、新行动结果 `dated-history-v1`，分别审计。
+同一验证版本内继续按证据规则拆分；旧、新及混合规则各自可查，不改写历史快照。
+
+新增表包括日线修订、行动验证状态及信号验证审计。接口保留原路径；任务新增阶段和终态标识，
+任务/主张修改必须带 `expected_revision`，与读取的 `revision` 对应。手动验证重试先保存队列再调度，
+后台繁忙不丢失请求。完整模型输入仅作本地审计，不新增遥测或外发。
+
+财务来源已提交的变化在行情刷新前失效旧分析；后续阶段失败也不会留下有效旧结果。
+X 主张更新或到期后，先失效相关分析再生成行动快照。任务失败按实际尝试事件统计，
+分析计数只计已提交的有效影响。人工验证队列不受自动研究刷新开关阻断。
+未保存输入摘要的历史分析按主张持久化材料变化失效；未变化的旧记录保留，原始输入不回填或伪造。
+
+旧样本先读取目标窗口，仅明确零成交停牌才按20个交易日扩展，最多额外100日；
+行情缺失不证明停牌，不顺延入场。A股总回报股票与价格收益指数不混算，缺口明确标为口径不一致。
+
+部署前停止旧服务、备份，再执行 `uv run --no-sync alembic upgrade head`。本轮实现不自动迁移业务库或重启服务。
+旧记录中的“个股模型等待写锁未解决”和“持仓超过24小时必须阻断”均已被后续实现取代。
+
+本轮主要文件：
+
+- 依据与后台：`models.py`、`schemas.py`、`api.py`、`services/analysis.py`、`analysis_context.py`、`analysis_versions.py`、`ingestion.py`、`x_posts.py`、`coordinator.py`、`research_cycle.py`。
+- 行情与验证：`daily_bar_models.py`、`risk_models.py`、`services/history_repository.py`、`validation_history.py`、`daily_bars.py`、`providers.py`、`market_research.py`、`evaluation.py`、`action_evaluation.py`、`scoring.py`、`metrics.py`。
+- 核验与页面：`workflow_models.py`、`research_api.py`、`services/research_workflow.py`、`evidence.py`，`static/` 下的 `poller.js`、`pe-analysis.js`、`research.js`、`workflow.js`，以及对应事件、研究、证券、任务、首页、状态和验证模板。
+- 启动与交付：`db.py`、`main.py`、`cli.py`、`services/source_health.py`、`alembic/versions/e83f20a7b691_research_reliability.py`、`.github/workflows/checks.yml`、`tests/conftest.py`、对应服务/API/Chrome/迁移回归及四份项目文档。源代码路径均位于 `src/trade_news_analysis/`。
+
+离线验收命令（测试使用临时数据库并禁止外网）：
+
+```bash
+CI_REQUIRE_BROWSER=1 .venv/bin/python -m pytest -m 'not network'
+.venv/bin/ruff check .
+.venv/bin/mypy src
+git diff --check
+```
+
+## 2026-09-29 复检计划实施
+
+本轮按运行隔离、判断与数据一致性、并发稳定、性能与交互完成修改，保留现有接口路径和单 worker 架构，不改变评分权重或新增付费来源。
+
+| 范围 | 已完成 | 回归覆盖 |
+| --- | --- | --- |
+| 运行与恢复 | 数据库初始化和任务恢复移到应用启动；遗留任务标记中断；测试导入及默认配置隔离 | 纯导入不创建数据库、启动恢复、启动失败清理 |
+| 事件一致性 | 按完整候选和主题集合撤销旧关联；区分股份类别；部分失败保留成功结果 | A+B→B、空集、无法匹配、同 Session 重建信号 |
+| 失败重试 | 瞬时失败最多三轮，按 1／5 分钟退避；部分成功继续可用 | 全部失败、部分失败、不重复成功证券、到期重试与上限 |
+| 验证与行动 | 真实交易日窗口；缺历史不顺延；动作和去重键读取新版执行结论 | 假期、半日市、停牌、历史缺口、减仓覆盖旧持有 |
+| 数据保护 | 保留 IR、IBKR、SEC 等本地映射；X 提交版本校验与证据保存同事务 | 资料刷新、模型等待时人工修改和帖子内容更新 |
+| 并发稳定 | 网络与解析在写事务外，按来源／证券短事务落库；SEC 目录失败同轮复用 | 网络等待时其他连接可保存、来源失败隔离、下一轮可重试 |
+| 查询与交互 | 三周期共享批量输入；管理页仅取所需数据；SQL 筛选后 LIMIT；保存期间冻结编辑，失败可重试 | 1／20／100 只自选均 23 次 SELECT；无关数据增长不影响搜索；断网／500／重复提交 |
+| 工程基线 | 修复源代码类型错误；增加 CI；忽略数据库备份；更新交接 | 测试、Ruff、Mypy、迁移往返及差异检查 |
+
+查询计数覆盖带持仓和大量历史任务的合成场景，是数据库查询规模测量，不代表真实页面耗时。
+
+最终验收：**790 项离线测试通过**（含 Chrome 保存交互）；Ruff、Mypy（57 个源文件）与 `git diff --check` 通过。
+相较复检基线 691 项，新增 99 个回归场景；剩余 25 条告警来自 Starlette、交易日历和 Alembic 的依赖弃用提示。
+CI 配置已加入仓库，本轮未在远程触发工作流。
+
+新信号结果标记 `strict-sessions-v2`，新行动快照标记 `execution-actions-v2`；历史结果按 `legacy-v1` 保留和分组，不混算、不重写。
+
+新增迁移头 `c72e19a640bf`，本轮仅在临时数据库验证升级／降级，未读取或迁移业务库，也未调用真实外部服务。
+已有部署须先备份并停止旧服务，执行 `uv run alembic upgrade head` 后重启。
+
+额外复查确认：个股影响分析仍沿用原有的模型等待期间写事务。研究刷新已完成本轮要求的隔离，
+候选发现阶段没有新增写锁；个股分析的完整分阶段提交及中断恢复留作后续优化，不能据此宣称所有后台写锁都已消除。
+
+### 本轮改动文件
+
+- 启动与后台：`src/trade_news_analysis/main.py`、`scheduler.py`、`services/coordinator.py`、`services/holdings.py`。
+- 数据结构与迁移：`src/trade_news_analysis/models.py`、`alembic/versions/c72e19a640bf_analysis_consistency.py`。
+- 判断与验证（位于 `src/trade_news_analysis/services/`）：`analysis.py`、`decision_policy.py`、`action_plan.py`、`social_context.py`、`judgment.py`、`evaluation.py`、`metrics.py`、`action_evaluation.py`。
+- 数据保护与刷新（同目录）：`ingestion.py`、`x_posts.py`、`research_refresh.py`、`research_data.py`、`market_research.py`。
+- 批量读取：`src/trade_news_analysis/api.py`、`services/research_inputs.py`、`services/calendar_context.py`、`services/research_workflow.py`、`services/risk.py`。
+- 页面（位于 `src/trade_news_analysis/`）：`templates/watchlist.html`、`event.html`、`detail.html`、`metrics.html`、`x_posts.html`，以及 `static/holdings.js`、`static/research.js`。
+- 工程与说明：`.github/workflows/checks.yml`、`.gitignore`、`tests/conftest.py` 及对应服务、迁移、API、浏览器回归测试；`README.md`、本文件、`BUSINESS_ROADMAP.md`、`handoff.md`。
+
+工作区仍包含前期已有改动；以上是本轮涉及的文件，不将所有未提交内容归为本轮新增。
+
+---
+
+## 2026-09-17 完整方案实施结果
+
+**以下为历史实施记录，测试数量和数据库升级状态仅对应当时；当前代码及升级要求以上面的 10 月 1 日记录为准。**
+
+原方案 A–D 的功能已落地，默认 5 个交易日并列显示 1/20 日。完整能力、实际覆盖和来源依据见 [业务路线图](BUSINESS_ROADMAP.md)。
+
+- **行动明确**：分开显示事件判断、年度估值与执行条件，列出具体核对对象、原文、完成条件和复核期限；不再只用“复核持仓”概括下一步。
+- **任务可跟踪**：保存检查进度、备注、期限及修改历史；来源改变会重新核验。页面解释“已完成检查”不等于事件发生或买卖条件满足。
+- **X 主张可核验**：关联证券，记录官方支持/反证、原始出处和期限，转述去重，截断内容保持待核实。
+- **官方事实接入**：SEC 财务事实和附件、现有 Finnhub/Tushare 能力、BLS/FOMC 日历与版本，A/HK/US 官方原文登记，季度/TTM 和发布前可比预期。
+- **同周期量价与风险**：真实交易所日历、复权、成交量、波动、行业相对表现；组合和单股风险预算、成本、集中度、股数上限。未知输入不补成零。
+- **结果验证闭环**：固定规则版本保存不可变快照，等待后续实际交易日检验，纳入成本、行业超额、收盘回撤和重复证据影响；小样本不输出校准概率。
+
+### 实际完成与保留缺口
+
+首轮 11 股初始化保存 3,703 条财务事实、179 份披露/附件、33 份行动快照和 64 条 X 主张。
+SEC、Finnhub 财报、FOMC 已实测成功；Finnhub 分红和 BLS 在当前环境返回 403，已明确降级。
+小米港股两条已有行情路径仍缺可核验复权或最新收盘价，继续阻断，不降低数据门槛。
+个人持仓、风险预算和行业基准仍需用户填写；收益验证需要后续交易日和足够独立样本。
+
+数据库已备份并升级。581 项测试、Ruff、Mypy 和页面检查通过；本地入口为 `/research`。
+后台研究刷新默认每 6 小时运行，忙碌时重试。建议使用顺序：确认持仓 → 刷新事实 → 核对原文 → 填写风险约束 → 处理具体待办 → 跟踪结果。
+
+### 后续优先级
+
+1. 根据工作台显示的真实缺口，补官方原文、首次披露依据和用户自己的风险输入。
+2. 积累成熟的行动样本，检查成本和行业基准后再比较规则，不根据少量命中提高权重。
+3. P2 继续评估付费行情、X API、HKEX IIS、非 PE 估值方法及作者长期质量；本轮没有启用新付费服务。
+
+主要改动涉及 `research_api.py`、研究工作台与行动模板、新研究/风险/核验模型，`research_refresh.py`、`financial_research.py`、`market_research.py`、`decision_policy.py`、`risk.py`、`research_workflow.py`、`action_evaluation.py`，以及协调调度、迁移与对应测试。
+
+---
+
+## 先前实施记录（截至 2026-09-16）
+
+**以下是历史记录。此前写作“尚未保存”“后续工作”的事项，当前实现状态以上面的 9 月 17 日结果为准。**
+
+## 2026-09-16 业务复核与行动项改进
+
+详细业务路线图见 [BUSINESS_ROADMAP.md](BUSINESS_ROADMAP.md)，遵循“优先已有接口和免费官方披露”。
+
+改进前实际 11 个自选标的中，9 个显示“复核持仓”，2 个显示“等待”；8 个存在报价缺失或
+过期。问题包含数据缺口，也包含短期新闻、年度估值、持仓风险混在同一兜底状态。
+
+本轮完成：
+
+- 将待定标签细分为报价更新、事件依据不足、多空分歧、估值缺口、等待催化等具体任务。
+- 行动卡显示核验对象、事件链接、检查时点，以及核实或证伪后如何改变判断。
+- 当前中性事件也可生成研究待办；待核验内容不会因此升级为买入或卖出信号。
+- 负面假设被证伪时撤回相应风险依据，避免把所有证伪都解释为卖出。
+- 明示催化日期和仓位风险数据的缺口；未虚构日程、买卖数量、目标价或止损价。
+
+当前仍是条件式研究待办，尚未保存任务完成状态、自动监听触发条件或验证行动收益。
+交易阈值本轮未调整；周期拆分、行情与预期差、风险预算和行动快照是后续工作。
+
 ## 本轮已落地
 
 - **结论可操作**：默认 5 日、对照 1/20 日；增加持仓状态、行动候选、阻断原因、催化与退出核验条件。
@@ -13,7 +166,9 @@
 
 | 优先级 | 优化项 | 解决的问题 | 完成标准 |
 | --- | --- | --- | --- |
-| P0 | 恢复 X 浏览器采集 | 有账号但无帖子时无法使用博主信息 | 每个启用账号有成功采集时间；原帖能沿关联路径到证券页 |
+| 已完成 | 恢复 X 采集并标记覆盖限制 | 有账号但无帖子时无法使用博主信息 | 已实测 7 个账号成功、19 条入库；公开主页可能漏帖，截断摘要保留待核验 |
+| P0 | 新鲜行情、公司原始披露与催化日历 | 短期行动缺少价格、事实和时间依据 | 来源、币种、有效时间与披露版本可追溯，明确已接入及覆盖缺口 |
+| P0 | 拆分事件、估值与执行判断 | 5 日机会被年度 PE 缺口混淆 | 事件候选与交易就绪分别显示；缺估值不冒充已验证便宜，缺价格不确定价位 |
 | P1 | 保存行动快照并前向验证 | 当前指标只检验新闻排序，无法证明买卖规则有效 | 保存当时持仓、规则版本、价格和证据；计入费用、滑点、最大回撤，按市场/周期做样本外验证 |
 | P1 | 仓位与风险预算 | 当前只能给方向，不能给买卖数量 | 用户填写成本、仓位比例、单笔风险及最大敞口；情景结果可复算，无自动交易 |
 | P1 | 结构化证据核验 | 分数高仍可能主要依赖推断 | 明示公告/报道/个人观点，核验订单、盈利兑现时间、失效事实；只在一手依据满足后升级证据等级 |
@@ -22,11 +177,12 @@
 
 先收集可复现的行动样本，再调整阈值。不要根据少量命中案例提高信号权重。
 
-## 本地运行检查（2026-09-15）
+## 本地运行检查（2026-09-15 至 09-16）
 
-检查时有 11 个自选股、7 个 X 账号、0 条 X 帖子，X 自动采集关闭；历史账号均无成功采集记录。
-本轮单账号抓取返回 `net::ERR_HTTP_RESPONSE_CODE_FAILURE`，另一次 X 首页导航成功，说明需要
-继续检查目标博主页访问与登录会话。不能将这次连通性结果解释为采集已恢复。
+初次检查时有 11 个自选股、7 个 X 账号、0 条 X 帖子，X 自动采集关闭。
+后续已修复代理、页面解析、失败状态及自动回退：7 个账号均成功，最近 24 小时内 19 条帖子
+入库并分类，6 条截断摘要被标记待核验；自动采集每 6 小时运行，任务占用时 1 分钟后重试。
+公开主页仅提供可见帖子，不代表完整时间线覆盖。
 
 新增字段需 `uv run alembic upgrade head`。已有持仓默认未知；人工价格需重新保存才会有独立
 确认时间。启动后的使用顺序是：填写持仓 → 更新价格与盈利假设 → 看行动与阻断条件 → 核验原文。
@@ -34,7 +190,7 @@
 ## 改动文件
 
 - 接口与数据：`src/trade_news_analysis/api.py`、`models.py`、`schemas.py`；迁移 `alembic/versions/e2b7c4a91d60_holding_status_and_price_confirmation.py`。
-- 服务：`src/trade_news_analysis/services/judgment.py`、`social_context.py`、`x_posts.py`、`pe_analysis.py`、`scoring.py`、`opportunities.py`。
+- 服务：`src/trade_news_analysis/services/action_plan.py`、`judgment.py`、`social_context.py`、`x_posts.py`、`pe_analysis.py`、`scoring.py`、`opportunities.py`。
 - 页面：`src/trade_news_analysis/templates/_decision.html`、`index.html`、`security.html`、`watchlist.html`、`x_posts.html`；样式 `src/trade_news_analysis/static/style.css`。
-- 验证：`tests/conftest.py`、`test_api.py`、`test_decisions_api.py`、`test_judgment.py`、`test_migrations.py`、`test_pe_analysis.py`、`test_scoring.py`、`test_opportunity_queries.py`、`test_social_context.py`、`test_x_posts.py`。
-- 说明：`README.md`、`OPTIMIZATION_PLAN.md`。
+- 验证：`tests/conftest.py`、`test_api.py`、`test_decisions_api.py`、`test_action_plan.py`、`test_judgment.py`、`test_migrations.py`、`test_pe_analysis.py`、`test_scoring.py`、`test_opportunity_queries.py`、`test_social_context.py`、`test_x_posts.py`。
+- 说明：`README.md`、`OPTIMIZATION_PLAN.md`、`BUSINESS_ROADMAP.md`。

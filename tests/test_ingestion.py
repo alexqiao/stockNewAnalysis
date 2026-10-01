@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from trade_news_analysis.config import Settings
 from trade_news_analysis.db import SessionFactory
@@ -54,6 +56,95 @@ def no_master(_settings: Settings) -> None:
     return None
 
 
+def test_source_flush_failure_rolls_back_and_later_sources_continue(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    first, second, _ = FakeSource().fetch().articles
+    third = replace(first, url="https://example.com/independent", title="Independent story")
+
+    class Source:
+        markets = ("US",)
+        coverage = "partial"
+
+        def __init__(self, name: str, items: list[NormalizedArticle]):
+            self.name, self.items = name, items
+
+        def fetch(self) -> SourceResult:
+            return SourceResult(self.name, self.items)
+
+    class FailingIngestion(IngestionService):
+        fail = True
+
+        def _persist_article(
+            self, session: Session, item: NormalizedArticle,
+        ) -> tuple[bool, int | None]:
+            if self.fail and item.url == second.url:
+                session.add(Article(
+                    fingerprint=first.fingerprint, canonical_url=first.url,
+                    source=first.source, title=first.title, story_cluster_id="duplicate",
+                ))
+                session.flush()  # Real UNIQUE failure leaves Session needing rollback.
+            return super()._persist_article(session, item)
+
+    service = FailingIngestion(
+        session_factory, settings, master_factory=no_master,
+        source_factory=lambda _items, _config: [
+            Source("broken", [first, second]), Source("working", [third]),
+        ],
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id)
+    with session_factory() as session:
+        run = session.get(IngestionRun, run_id)
+        assert run is not None and run.status == "partial"
+        assert run.articles_seen == run.articles_new == 1
+        assert session.scalars(select(Article.canonical_url)).all() == [third.url]
+        health = session.scalar(select(SourceHealth).where(SourceHealth.source == "broken"))
+        assert health is not None and health.consecutive_failures == 1
+    service.fail = False
+    service.execute_run(service.create_run("retry"))
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Article)) == 3
+
+
+def test_coordinator_owned_ingestion_does_not_mark_whole_run_complete(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    service = IngestionService(
+        session_factory, settings, source_factory=fake_sources, master_factory=no_master,
+    )
+    run_id = service.create_run("test")
+    service.execute_run(run_id, finalize=False)
+    with session_factory() as session:
+        run = session.get(IngestionRun, run_id)
+        assert run is not None and run.status == "running"
+        assert run.completed_at is None
+        assert run.articles_new == 2
+
+
+def test_same_url_material_revision_invalidates_once_without_duplicate_article(
+    session_factory: SessionFactory, settings: Settings,
+) -> None:
+    service = IngestionService(
+        session_factory, settings, source_factory=fake_sources, master_factory=no_master,
+    )
+    original = FakeSource().fetch().articles[0]
+    with session_factory() as session:
+        _, event_id = service._persist_article(session, original)
+        event = session.get(Event, event_id)
+        assert event is not None
+        event.status = "complete"
+        session.commit()
+        revised = replace(original, summary="The publisher corrected the disclosed amount.")
+        assert service._persist_article(session, revised) == (False, None)
+        assert event.status == "stale" and event.evidence_version == 1
+        session.commit()
+        assert service._persist_article(session, revised) == (False, None)
+        assert event.evidence_version == 1
+        assert session.scalar(select(func.count()).select_from(Article)) == 1
+        assert session.scalar(select(Article.summary)) == revised.summary
+
+
 class FakeSemanticMatcher:
     def __init__(self, scores: list[float] | None):
         self.scores = scores
@@ -96,6 +187,32 @@ def test_ingestion_clusters_duplicate_reports_into_one_event(
         assert run is not None
         assert run.articles_seen == 3
         assert run.articles_new == 0
+
+
+@pytest.mark.parametrize("status", ["complete", "partial", "error", "unavailable", "pending"])
+def test_new_evidence_invalidates_finished_or_failed_events(
+    session_factory: SessionFactory, settings: Settings, status: str,
+) -> None:
+    service = IngestionService(
+        session_factory, settings, source_factory=fake_sources, master_factory=no_master,
+    )
+    first, second, _ = FakeSource().fetch().articles
+    with session_factory() as session:
+        created, event_id = service._persist_article(session, first)
+        assert created and event_id is not None
+        event = session.get(Event, event_id)
+        assert event is not None
+        event.status = status
+        session.flush()
+
+        created, queued_id = service._persist_article(session, second)
+
+        assert created
+        assert queued_id == (None if status == "pending" else event_id)
+        assert event.status == ("pending" if status == "pending" else "stale")
+        assert event.evidence_version == 1
+        session.flush()
+        assert service._persist_article(session, second) == (False, None)
 
 
 def test_semantic_clustering_selects_best_cross_language_candidate(
@@ -334,7 +451,8 @@ def test_coordinator_records_and_propagates_unhandled_pipeline_error(
         assert run is not None
         assert run.status == "failed"
         assert run.completed_at is not None
-        assert "TypeError: unexpected pipeline failure" in run.errors[-1]
+        assert "TypeError" in run.errors[-1]
+        assert "unexpected pipeline failure" not in run.errors[-1]
 
 
 def test_ingestion_tracks_macro_research_assets(
@@ -396,3 +514,28 @@ def test_security_master_preserves_macro_asset_classification(
         assert gold_assets[0].industry == "黄金"
         assert gold_assets[0].provider_data["opportunity_group"] == "黄金"
         assert gold_assets[0].provider_data["source"] == "test"
+
+
+def test_security_master_preserves_local_research_and_broker_configuration(
+    session: Session,
+) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security is not None
+    local = {
+        "official_ir_url": "https://investor.example.com",
+        "ibkr_con_id": 123456,
+        "sec_cik": 320193,
+        "cik": "0000320193",
+    }
+    security.provider_data = {**local, "source": "old-provider", "stale_provider_key": True}
+    session.flush()
+
+    updated = IngestionService._upsert_security(session, SecurityRecord(
+        market=security.market, exchange=security.exchange, symbol=security.symbol,
+        name="Updated company name", aliases=[],
+        provider_data={"source": "new-provider", "ibkr_con_id": 999, "sec_cik": 999},
+    ))
+
+    assert updated.id == security.id
+    assert updated.name == "Updated company name"
+    assert updated.provider_data == {**local, "source": "new-provider"}

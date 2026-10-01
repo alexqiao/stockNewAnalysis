@@ -8,7 +8,12 @@ import sys
 import uvicorn
 
 from .config import get_settings
-from .db import build_engine, build_session_factory, initialize_database
+from .db import (
+    build_engine,
+    build_session_factory,
+    check_database_compatibility,
+    initialize_database,
+)
 from .services.coordinator import PipelineCoordinator
 from .services.telegram import TelegramDigestService, telegram_client_from_settings
 from .services.x_posts import PlaywrightXFetcher
@@ -33,7 +38,16 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "serve":
-        uvicorn.run("trade_news_analysis.main:app", host=args.host, port=args.port, reload=False)
+        config = uvicorn.Config(
+            "trade_news_analysis.main:app", host=args.host, port=args.port, reload=False,
+        )
+        # Reserve the port before importing the app, which initializes data and starts jobs.
+        with config.bind_socket() as sock:
+            sock.listen(config.backlog)
+            server = uvicorn.Server(config)
+            server.run(sockets=[sock])
+            if not server.started:
+                raise SystemExit(3)
         return
 
     settings = get_settings()
@@ -58,7 +72,12 @@ def main() -> None:
 
     settings.ensure_local_directories()
     engine = build_engine(settings.database_url)
-    initialize_database(engine, settings)
+    try:
+        check_database_compatibility(engine)
+        initialize_database(engine, settings)
+    except Exception:
+        engine.dispose()
+        raise
     factory = build_session_factory(engine)
 
     if args.command == "telegram-digest":

@@ -77,7 +77,7 @@ def test_combined_judgment_exposes_missing_pe_inputs() -> None:
 
     assert result["status"] == "incomplete"
     assert result["label"] == "新闻偏多，PE 估值待补"
-    assert "先补齐盈利预测和 PE 区间" in result["summary"]
+    assert "是否已经计价还需市场预期和事件前后行情" in result["summary"]
 
 
 def test_high_conflict_downgrades_directional_signal() -> None:
@@ -357,3 +357,173 @@ def test_withdrawn_evidence_does_not_reappear_as_key_event() -> None:
 
     assert result["key_events"] == []
     assert result["action"]["flat_action"]["code"] == "wait"
+
+
+@pytest.mark.parametrize(
+    ("holding_status", "news", "valuation", "label", "reason_fragment"),
+    [
+        (
+            "long",
+            fresh_signal(as_of=NOW - timedelta(days=7)),
+            fresh_pe(price_as_of=NOW - timedelta(days=7), status="needs_input"),
+            "先更新报价",
+            "报价已超过 3 个工作日",
+        ),
+        (
+            "flat",
+            fresh_signal(),
+            fresh_pe(price_as_of=None),
+            "先更新报价",
+            "报价时间缺失",
+        ),
+        (
+            "long",
+            fresh_signal(),
+            fresh_pe(source_status="error"),
+            "先更新报价",
+            "自动报价来源最近刷新失败",
+        ),
+        (
+            "long",
+            fresh_signal(as_of=NOW - timedelta(days=7)),
+            fresh_pe(status="needs_input"),
+            "补当前事件依据",
+            "新闻信号已超过 1 个工作日",
+        ),
+        (
+            "flat",
+            fresh_signal(as_of=None),
+            fresh_pe(),
+            "补当前事件依据",
+            "新闻信号时间缺失",
+        ),
+        (
+            "long",
+            fresh_signal(evidence_event_ids=[]),
+            fresh_pe(),
+            "等待可验证催化",
+            "缺少仍有效的事件依据",
+        ),
+        (
+            "flat",
+            None,
+            fresh_pe(status="needs_input"),
+            "等待可验证催化",
+            "没有可用的个股新闻信号",
+        ),
+        (
+            "long",
+            fresh_signal("neutral", conflict=0.8, decision_score=0),
+            fresh_pe(status="needs_input"),
+            "先核对分歧",
+            "暂缓加仓",
+        ),
+        (
+            "flat",
+            fresh_signal(conflict=0.35),
+            fresh_pe(),
+            "先核对分歧",
+            "暂缓建仓",
+        ),
+        (
+            "long",
+            fresh_signal(confidence=0.3),
+            fresh_pe(status="needs_input"),
+            "补合适估值依据",
+            "PE 盈利和估值假设不完整",
+        ),
+        (
+            "flat",
+            fresh_signal(),
+            fresh_pe(status="not_applicable"),
+            "补合适估值依据",
+            "PE 方法不适用",
+        ),
+        (
+            "long",
+            fresh_signal(),
+            fresh_pe(valuation_year=2025),
+            "补合适估值依据",
+            "第一预测年度已过去",
+        ),
+        (
+            "long",
+            fresh_signal(confidence=0.3),
+            fresh_pe("above_range"),
+            "核对估值是否透支",
+            "高于 PE 假设区间上沿",
+        ),
+        (
+            "long",
+            fresh_signal(confidence=0.3),
+            fresh_pe(),
+            "暂缓加仓，等待明确催化",
+            "新闻置信度未达到 50%",
+        ),
+        (
+            "flat",
+            fresh_signal("neutral", decision_score=0),
+            fresh_pe(),
+            "暂缓建仓，等待明确催化",
+            "新闻尚未形成明确方向",
+        ),
+    ],
+)
+def test_pending_action_names_the_first_gap_to_resolve(
+    holding_status: str,
+    news: dict[str, Any] | None,
+    valuation: dict[str, Any],
+    label: str,
+    reason_fragment: str,
+) -> None:
+    action = build_watchlist_judgment(
+        news, valuation, holding_status=holding_status, now=NOW
+    )["action"]
+
+    assert action["code"] == ("review" if holding_status == "long" else "wait")
+    assert action["label"] == label
+    assert reason_fragment in action["reason"]
+    assert action["blockers"]
+
+
+def test_pending_action_keeps_all_gaps_when_price_has_priority() -> None:
+    action = build_watchlist_judgment(
+        fresh_signal(as_of=None, confidence=0.3),
+        fresh_pe(price_as_of=None, status="needs_input"),
+        holding_status="long",
+        now=NOW,
+    )["action"]
+
+    assert action["label"] == "先更新报价"
+    assert "报价缺口本身不构成卖出理由" in action["reason"]
+    assert any("新闻信号时间缺失" in item for item in action["blockers"])
+    assert any("新闻置信度" in item for item in action["blockers"])
+    assert any("报价时间缺失" in item for item in action["blockers"])
+    assert any("PE 盈利和估值假设不完整" in item for item in action["blockers"])
+
+
+def test_bearish_risk_label_takes_priority_over_missing_quote() -> None:
+    action = build_watchlist_judgment(
+        fresh_signal("bearish"),
+        fresh_pe(price_as_of=None, status="needs_input"),
+        holding_status="long",
+        now=NOW,
+    )["action"]
+
+    assert action["code"] == "reduce"
+    assert action["label"] == "减仓候选"
+    assert any("报价时间缺失" in item for item in action["next_steps"])
+
+
+def test_cross_horizon_conflict_names_the_actual_entry_blocker() -> None:
+    action = build_watchlist_judgment(
+        fresh_signal(),
+        fresh_pe(),
+        holding_status="flat",
+        signals_by_horizon={"20": fresh_signal("bearish", horizon=20)},
+        now=NOW,
+    )["action"]
+
+    assert action["code"] == "wait"
+    assert action["label"] == "等待周期方向一致"
+    assert "其他周期的有效负面信号冲突" in action["reason"]

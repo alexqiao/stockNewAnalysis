@@ -1,21 +1,29 @@
 {% extends "base.html" %}
 {% block title %}运行状态 · 股票事件研究{% endblock %}
 {% block content %}
+{% set phases = {'queued':'等待执行','ingestion':'采集','analysis':'分析','facts':'刷新事实','market':'更新行情','snapshots':'保存判断','evaluation':'验证','finished':'已结束'} %}
+{% set statuses = {'queued':'排队中','running':'运行中','complete':'完成','completed':'完成','partial':'部分完成','failed':'失败'} %}
+{% set labels = {'sources_succeeded':'成功来源','sources_failed':'失败来源','sources_skipped':'暂缓来源','analyzed':'分析事件','evaluated':'完成验证','failed':'未完成项','snapshots':'行动快照','evaluation_completed':'成熟结果','evaluation_pending':'待验证','reanalysis_required':'待重评事件','updated':'更新数量','skipped':'暂缓数量','interrupted_phase':'中断阶段'} %}
 <section class="page-heading"><p class="eyebrow">SYSTEM HEALTH</p><h1>运行状态</h1></section>
 {% if health.coverage_warning %}<div class="notice">{{ health.coverage_warning }}</div>{% endif %}
 <div class="metric-grid">
-  <div class="metric"><span>整体状态</span><strong>{{ health.status }}</strong></div>
+  <div class="metric"><span>服务 / 数据可用性</span><strong>{{ health.service_status }} / {{ health.status }}</strong></div>
   <div class="metric"><span>LLM</span><strong>{{ "已配置" if health.llm_configured else "未配置" }}</strong></div>
   <div class="metric"><span>Tushare</span><strong>{{ "已配置" if health.tushare_configured else "免费降级" }}</strong></div>
   <div class="metric"><span>语义聚类</span><strong>{% if not health.semantic_clustering.enabled %}未启用{% elif health.semantic_clustering.lexical_fallback %}词法回退{% else %}已启用{% endif %}</strong></div>
   <div class="metric"><span>流水线</span><strong>{{ "运行中" if health.pipeline_busy else "空闲" }}</strong></div>
   <div class="metric"><span>X 博主采集</span><strong>{% if health.x_browser_enabled %}每 {{ health.x_fetch_interval_hours }} 小时{% else %}未启用{% endif %}</strong></div>
 </div>
+<section class="analysis-panel"><h2>最近任务</h2>
+  <table><thead><tr><th>任务</th><th>阶段</th><th>状态</th><th>开始 / 完成</th><th>结果与错误</th></tr></thead><tbody>
+  {% for run in health.latest_runs %}<tr><td>#{{ run.id }} · {{ run.trigger }}</td><td>{{ phases.get(run.phase, run.phase) }}</td><td>{{ statuses.get(run.status, run.status) }}{% if not run.is_terminal %} · 尚未结束{% endif %}</td><td>{{ run.started_at }}<br>{{ run.completed_at or "—" }}</td><td>{% for key, value in run.summary.items() %}{{ labels.get(key, key) }}: {{ value }}<br>{% endfor %}{{ run.errors|join("；") }}</td></tr>{% else %}<tr><td colspan="5">暂无任务</td></tr>{% endfor %}
+  </tbody></table>
+</section>
 <section class="analysis-panel"><h2>市场覆盖</h2><div class="signals">{% for market, coverage in health.market_coverage.items() %}<span class="tag">{{ market }} · {{ coverage }}</span>{% endfor %}</div></section>
 <section class="analysis-panel">
   <h2>数据源能力</h2>
-  <table><thead><tr><th>来源</th><th>能力</th><th>市场/覆盖</th><th>最近成功</th><th>本次数量</th><th>错误</th></tr></thead><tbody>
-  {% for source in health.sources %}<tr><td>{{ source.source }}</td><td>{{ source.capability }}</td><td>{{ source.markets|join("/") }} · {{ source.coverage }}</td><td>{{ source.last_success_at or "—" }}</td><td>{{ source.items_last_run }}</td><td>{{ source.last_error or "—" }}</td></tr>{% else %}<tr><td colspan="6">尚未运行采集</td></tr>{% endfor %}
+  <table><thead><tr><th>来源</th><th>能力</th><th>市场/覆盖</th><th>当前可用性</th><th>最近成功</th><th>本次数量</th><th>错误</th></tr></thead><tbody>
+  {% for source in health.sources %}<tr><td>{{ source.source }}</td><td>{{ source.capability }}</td><td>{{ source.markets|join("/") }} · {{ source.coverage }}</td><td>{{ {'fresh':'正常','stale':'已过期','failing':'最近失败','never_succeeded':'尚未成功'}.get(source.availability, source.availability) }}{% if source.next_retry_at %}<br>允许重试：{{ source.next_retry_at }}{% endif %}</td><td>{{ source.last_success_at or "—" }}</td><td>{{ source.items_last_run }}</td><td>{{ source.last_error or "—" }}</td></tr>{% else %}<tr><td colspan="7">尚未运行采集</td></tr>{% endfor %}
   </tbody></table>
 </section>
 {% endblock %}

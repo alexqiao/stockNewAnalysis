@@ -144,6 +144,7 @@ def configure_cli(
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(Settings, "ensure_local_directories", lambda _settings: None)
     monkeypatch.setattr(cli, "build_engine", lambda _url: engine)
+    monkeypatch.setattr(cli, "check_database_compatibility", Mock(return_value="current"))
     monkeypatch.setattr(cli, "initialize_database", Mock())
     monkeypatch.setattr(cli, "build_session_factory", Mock())
     monkeypatch.setattr(cli, "PipelineCoordinator", lambda _factory, _settings: coordinator)

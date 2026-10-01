@@ -481,9 +481,16 @@ def test_api_end_to_end(session_factory: SessionFactory, settings: Settings) -> 
         assert "rank_correlation" in metrics_payload
         assert metrics_payload["rank_ic_periods"] == 0
         assert "rank_ic_mean" in metrics_payload["by_market"]["US"]
+        assert metrics_payload["evaluation_version"] == "strict-sessions-v3"
+        assert set(metrics_payload["by_evaluation_version"]) == {
+            "legacy-v1", "strict-sessions-v3",
+        }
         metrics_page = client.get("/metrics").text
         assert "前向验证" in metrics_page
         assert "Rank ICIR" in metrics_page
+        assert "按验证口径分别统计" in metrics_page
+        assert "strict-sessions-v3" in metrics_page
+        assert "legacy-v1" in metrics_page
         health_payload = client.get("/api/v1/health").json()
         assert health_payload["status"] == "ok"
         assert health_payload["semantic_clustering"]["enabled"] is False

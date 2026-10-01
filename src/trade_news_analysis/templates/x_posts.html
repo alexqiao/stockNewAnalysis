@@ -7,22 +7,99 @@
 </section>
 <div class="notice"><strong>采集覆盖：{{ collection.fresh_accounts }} / {{ collection.active_accounts }} 个账号近期成功</strong>{% if collection.gaps %}<p>{{ collection.gaps|join("；") }}</p><a href="/status">查看失败原因与运行状态</a>{% endif %}</div>
 <form class="filters" method="get"><label>账号<select name="account_id"><option value="">全部</option>{% for account in accounts %}<option value="{{ account.id }}"{% if selected_account_id == account.id %} selected{% endif %}>@{{ account.handle }}</option>{% endfor %}</select></label><label>状态<select name="screening_status"><option value="">全部</option>{% for value, label in [("review", "待审核"), ("promoted", "已纳入"), ("context", "仅参考"), ("ignored", "已忽略"), ("pending", "待筛选")] %}<option value="{{ value }}"{% if selected_status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button class="secondary" type="submit">筛选</button></form>
-<div id="message" class="notice hidden"></div>
+<div id="message" class="notice hidden" role="status" aria-live="polite"></div>
+<div id="decision-message" class="notice hidden" role="status" aria-live="polite"></div>
 <section class="social-feed">{% for post in posts %}<article class="news-card social-post" id="post-{{ post.id }}" data-id="{{ post.id }}"><div class="meta"><span>@{{ post.account.handle }} · {{ post.account.account_type }}</span><span>{{ post.published_at }}</span></div><div class="signals"><span class="direction {{ post.screening_status }}">{{ post.screening_status }}</span><span class="tag">{{ post.screening.classification or "未分类" }}</span>{% for theme in post.screening.themes or [] %}<span class="tag">{{ theme }}</span>{% endfor %}</div>{% if post.is_truncated %}<p class="notice">正文未完整：这是页面展示的摘要，请打开原帖核对完整内容。</p>{% endif %}<p>{{ post.text or "（无文字，仅媒体）" }}</p>{% if post.quoted_text %}<blockquote>引用 @{{ post.quoted_author_handle }}：{{ post.quoted_text }}</blockquote>{% endif %}{% if post.screening.claim_summary %}<p class="muted"><strong>筛选摘要：</strong>{{ post.screening.claim_summary }}</p>{% endif %}<div class="meta"><a class="external" href="{{ post.url }}" target="_blank" rel="noopener noreferrer">查看原帖 ↗</a><span>{{ post.media|length }} 个媒体 · {{ post.external_links|length }} 个外链</span></div><div class="actions review-actions"><button class="primary decision" data-decision="promote">纳入分析</button><button class="secondary decision" data-decision="context">仅作参考</button><button class="secondary decision" data-decision="ignore">忽略</button>{% if post.related_event_id %}<a href="/events/{{ post.related_event_id }}">关联事件 #{{ post.related_event_id }}</a>{% endif %}</div></article>{% else %}<div class="empty">尚无帖子。点击“立即抓取”读取博主动态；若采集失败，请到运行状态页查看原因。</div>{% endfor %}</section>
 {% endblock %}
 {% block scripts %}<script>
 const message = document.getElementById('message');
 function showMessage(text) { message.textContent = text; message.classList.remove('hidden'); }
-document.getElementById('run-x').onclick = async function () {
-  this.disabled = true;
-  const response = await fetch('/api/v1/runs/x-ingest', {method: 'POST'});
-  showMessage(response.ok ? 'X 抓取已排队，稍后刷新页面查看。' : '启动失败：' + ((await response.json()).detail || response.status));
+const decisionMessage = document.getElementById('decision-message');
+function showDecisionMessage(text) {
+  decisionMessage.textContent = text;
+  decisionMessage.classList.remove('hidden');
+}
+try {
+  const saved = sessionStorage.getItem('x-decision-message');
+  if (saved) {
+    showDecisionMessage(saved);
+    sessionStorage.removeItem('x-decision-message');
+  }
+} catch (_) { /* Storage may be unavailable; keep current-page feedback usable. */ }
+const runXButton = document.getElementById('run-x');
+const xRunMessages = {
+  collecting: '正在抓取 X 帖子，抓到的内容会立即保存。',
+  queued_screening: '原帖已入库，正在等待模型筛选；可先查看下方内容。',
+  screening: '原帖已入库，正在进行模型筛选与分析。',
+  completed: 'X 抓取和筛选流程已结束；各账号结果见采集覆盖和运行状态。',
+  failed: 'X 任务失败，已保存的原帖仍可查看。请到运行状态检查各账号错误后重试。'
 };
+async function xRunRequest(method) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    const url = '/api/v1/runs/x-ingest' + (method === 'GET' ? '/status' : '');
+    const response = await fetch(url, {method: method, signal: controller.signal});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+    return data;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+async function monitorXRun(refreshAfterCollection, wasRunning) {
+  try {
+    const data = await xRunRequest('GET');
+    const running = ['collecting', 'queued_screening', 'screening'].includes(data.status);
+    runXButton.disabled = running;
+    if (data.status !== 'idle') showMessage(xRunMessages[data.status] || '正在检查采集状态…');
+    if ((refreshAfterCollection && data.status !== 'collecting' && data.status !== 'idle')
+        || (wasRunning && data.status === 'completed')) {
+      window.location.reload();
+      return;
+    }
+    if (running) window.setTimeout(() => monitorXRun(refreshAfterCollection, true), 2000);
+  } catch (error) {
+    runXButton.disabled = false;
+    showMessage('无法获取 X 任务状态，请检查连接后刷新页面。');
+  }
+}
+runXButton.onclick = async function () {
+  runXButton.disabled = true;
+  showMessage('正在启动 X 抓取…');
+  try {
+    await xRunRequest('POST');
+    await monitorXRun(true, true);
+  } catch (error) {
+    runXButton.disabled = false;
+    showMessage('启动失败：' + error.message);
+  }
+};
+monitorXRun(false, false);
 document.querySelectorAll('.decision').forEach(function (button) {
   button.onclick = async function () {
+    if (button.disabled) return;
     const card = button.closest('[data-id]');
-    const response = await fetch('/api/v1/x/posts/' + card.dataset.id + '/decision', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision: button.dataset.decision})});
-    if (response.ok) window.location.reload(); else showMessage('操作失败：' + ((await response.json()).detail || response.status));
+    const controls = card.querySelectorAll('.decision');
+    controls.forEach(control => { control.disabled = true; });
+    let refreshing = false;
+    try {
+      const response = await fetch('/api/v1/x/posts/' + card.dataset.id + '/decision', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision: button.dataset.decision})});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+      const notice = data.message || '人工决定已保存。';
+      showDecisionMessage(notice);
+      let remembered = false;
+      try { sessionStorage.setItem('x-decision-message', notice); remembered = true; } catch (_) {}
+      if (remembered || data.analysis_status !== 'pending') {
+        refreshing = true;
+        window.location.reload();
+      }
+    } catch (error) {
+      showDecisionMessage('操作失败：' + error.message);
+    } finally {
+      if (!refreshing) controls.forEach(control => { control.disabled = false; });
+    }
   };
 });
 </script>{% endblock %}

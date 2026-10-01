@@ -21,11 +21,15 @@ class FakePage:
         navigation_error: Exception | None = None,
         redirect_url: str | None = None,
         response_status: int | None = 200,
+        selector_error: Exception | None = None,
+        html: str = "",
     ) -> None:
         self.payloads = payloads
         self.navigation_error = navigation_error
         self.redirect_url = redirect_url
         self.response_status = response_status
+        self.selector_error = selector_error
+        self.html = html
         self.url = "about:blank"
         self.goto_count = 0
         self.selector_count = 0
@@ -45,6 +49,11 @@ class FakePage:
 
     def wait_for_selector(self, _selector: str, **_kwargs: object) -> None:
         self.selector_count += 1
+        if self.selector_error:
+            raise self.selector_error
+
+    def content(self) -> str:
+        return self.html
 
     def evaluate(self, _script: str, _arguments: object) -> object:
         self.evaluate_count += 1
@@ -262,6 +271,38 @@ def test_browser_fetch_http_forbidden_reports_http_error_and_closes_context(
     assert caught.value.code == "http"
     assert "403" in str(caught.value)
     assert page.evaluate_count == 0
+    assert context.closed
+
+
+def test_browser_suspended_account_is_reported_without_retry(
+    monkeypatch: MonkeyPatch, settings: Settings,
+) -> None:
+    page = FakePage(
+        selector_error=TimeoutError("no articles"),
+        html="<main><h2>Account suspended</h2></main>",
+    )
+    fetcher, context, _ = fake_browser(monkeypatch, settings, page)
+
+    with pytest.raises(XBrowserError, match="账号已停用") as caught:
+        fetcher.fetch("example")
+
+    assert caught.value.code == "account"
+    assert page.goto_count == 1
+    assert page.evaluate_count == 0
+    assert context.closed
+
+
+def test_browser_missing_articles_without_suspension_still_retries(
+    monkeypatch: MonkeyPatch, settings: Settings,
+) -> None:
+    page = FakePage(selector_error=TimeoutError("no articles"), html="<main>Loading</main>")
+    fetcher, context, _ = fake_browser(monkeypatch, settings, page)
+
+    with pytest.raises(XBrowserError) as caught:
+        fetcher.fetch("example")
+
+    assert caught.value.code == "page"
+    assert page.goto_count == 2
     assert context.closed
 
 

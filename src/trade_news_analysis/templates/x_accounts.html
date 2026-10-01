@@ -5,16 +5,45 @@
   <p class="eyebrow">CURATED X ACCOUNTS</p>
   <div class="panel-heading"><div><h1>博主白名单</h1><p class="lead">账号类型会影响证据处理：个人博主默认只作线索，公司、监管和媒体账号可在满足筛选条件时自动晋级。</p></div><a class="secondary button-link" href="/x">返回动态</a></div>
 </section>
+<div id="message" class="notice hidden" role="status" aria-live="polite"></div>
 <section class="analysis-panel">
-  <table id="accounts"><thead><tr><th>账号</th><th>显示名</th><th>类型</th><th>标签</th><th>顺序</th><th>启用</th><th></th></tr></thead><tbody>
-    {% for account in accounts %}<tr data-id="{{ account.id }}"><td>@{{ account.handle }}</td><td><input data-field="display_name" value="{{ account.display_name }}"></td><td><select data-field="account_type"><option value="commentator"{% if account.account_type == "commentator" %} selected{% endif %}>个人博主</option><option value="company"{% if account.account_type == "company" %} selected{% endif %}>公司官方</option><option value="regulator"{% if account.account_type == "regulator" %} selected{% endif %}>监管机构</option><option value="media"{% if account.account_type == "media" %} selected{% endif %}>媒体</option></select></td><td><input data-field="tags" value="{{ account.tags|join(',') }}"></td><td><input data-field="priority" type="number" min="0" value="{{ account.priority }}"></td><td><input data-field="active" type="checkbox"{% if account.active %} checked{% endif %}></td><td><button class="secondary save-account">保存</button></td></tr>{% endfor %}
+  <p class="muted">暂停采集：取消“启用”并保存。删除账号会移除其收件箱帖子，已纳入事件的证据和历史核验记录仍保留。</p>
+  <table id="accounts"><thead><tr><th>账号</th><th>显示名</th><th>类型</th><th>标签</th><th>顺序</th><th>启用</th><th>操作</th></tr></thead><tbody>
+    {% for account in accounts %}<tr data-id="{{ account.id }}" data-handle="{{ account.handle }}"><td>@{{ account.handle }}</td><td><input data-field="display_name" value="{{ account.display_name }}"></td><td><select data-field="account_type"><option value="commentator"{% if account.account_type == "commentator" %} selected{% endif %}>个人博主</option><option value="company"{% if account.account_type == "company" %} selected{% endif %}>公司官方</option><option value="regulator"{% if account.account_type == "regulator" %} selected{% endif %}>监管机构</option><option value="media"{% if account.account_type == "media" %} selected{% endif %}>媒体</option></select></td><td><input data-field="tags" value="{{ account.tags|join(',') }}"></td><td><input data-field="priority" type="number" min="0" value="{{ account.priority }}"></td><td><input data-field="active" type="checkbox"{% if account.active %} checked{% endif %}></td><td><div class="actions"><button type="button" class="secondary save-account">保存</button><button type="button" class="secondary delete-account" aria-expanded="false">删除</button></div><div class="notice hidden delete-confirmation" role="group" aria-label="确认删除账号"><p>确认删除 @{{ account.handle }} 及其收件箱帖子？已纳入事件的证据和历史核验记录会保留。</p><div class="actions"><button type="button" class="primary confirm-delete">确认删除</button><button type="button" class="secondary cancel-delete">取消</button></div></div></td></tr>{% else %}<tr class="empty-accounts"><td colspan="7">暂无账号，可在下方添加。</td></tr>{% endfor %}
   </tbody></table>
 </section>
-<section class="analysis-panel"><h2>新增账号</h2><div class="filters"><label>X Handle<input id="new-handle" placeholder="例如 XDevelopers"></label><label>显示名<input id="new-name"></label><label>类型<select id="new-type"><option value="commentator">个人博主</option><option value="company">公司官方</option><option value="regulator">监管机构</option><option value="media">媒体</option></select></label><button id="add-account" class="primary">添加</button></div><div id="message" class="notice hidden"></div></section>
+<section class="analysis-panel"><h2>新增账号</h2><div class="filters"><label>X Handle<input id="new-handle" placeholder="例如 XDevelopers"></label><label>显示名<input id="new-name"></label><label>类型<select id="new-type"><option value="commentator">个人博主</option><option value="company">公司官方</option><option value="regulator">监管机构</option><option value="media">媒体</option></select></label><button id="add-account" class="primary">添加</button></div></section>
 {% endblock %}
 {% block scripts %}<script>
 const message = document.getElementById('message');
-function showMessage(text) { message.textContent = text; message.classList.remove('hidden'); }
+function showMessage(text) {
+  message.textContent = text;
+  message.classList.remove('hidden');
+  message.scrollIntoView({block: 'nearest'});
+}
+function setRowBusy(row, busy) {
+  row.querySelectorAll('button').forEach(button => { button.disabled = busy; });
+}
+async function accountRequest(url, options) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {...options, signal: controller.signal});
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail = data && data.detail;
+      if (Array.isArray(detail)) throw new Error(detail.map(item => item.msg).join('；'));
+      throw new Error(typeof detail === 'string' ? detail : '服务器返回 HTTP ' + response.status);
+    }
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('请求超时，请刷新页面确认结果后重试。');
+    if (error instanceof TypeError) throw new Error('网络连接失败，请稍后重试。');
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
 document.querySelectorAll('.save-account').forEach(function (button) {
   button.onclick = async function () {
     const row = button.closest('tr');
@@ -25,13 +54,61 @@ document.querySelectorAll('.save-account').forEach(function (button) {
       priority: Number(row.querySelector('[data-field="priority"]').value || 0),
       active: row.querySelector('[data-field="active"]').checked
     };
-    const response = await fetch('/api/v1/x/accounts/' + row.dataset.id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-    showMessage(response.ok ? '账号已保存。' : '保存失败：' + ((await response.json()).detail || response.status));
+    setRowBusy(row, true);
+    showMessage('正在保存 @' + row.dataset.handle + '…');
+    try {
+      await accountRequest('/api/v1/x/accounts/' + row.dataset.id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      showMessage('账号已保存。');
+    } catch (error) {
+      showMessage('保存失败：' + error.message);
+    } finally {
+      setRowBusy(row, false);
+    }
+  };
+});
+document.querySelectorAll('.delete-account').forEach(function (button) {
+  const row = button.closest('tr');
+  const confirmation = row.querySelector('.delete-confirmation');
+  const confirmButton = row.querySelector('.confirm-delete');
+  button.onclick = function () {
+    confirmation.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    confirmButton.focus();
+  };
+  row.querySelector('.cancel-delete').onclick = function () {
+    confirmation.classList.add('hidden');
+    button.setAttribute('aria-expanded', 'false');
+    button.focus();
+  };
+  confirmButton.onclick = async function () {
+    setRowBusy(row, true);
+    showMessage('正在删除 @' + row.dataset.handle + '…');
+    try {
+      await accountRequest('/api/v1/x/accounts/' + row.dataset.id, {method: 'DELETE'});
+      row.remove();
+      if (!document.querySelector('#accounts tr[data-id]')) {
+        document.querySelector('#accounts tbody').innerHTML = '<tr class="empty-accounts"><td colspan="7">暂无账号，可在下方添加。</td></tr>';
+      }
+      showMessage('@' + row.dataset.handle + ' 已删除。');
+    } catch (error) {
+      showMessage('删除失败：' + error.message);
+    } finally {
+      setRowBusy(row, false);
+    }
   };
 });
 document.getElementById('add-account').onclick = async function () {
+  const button = this;
   const payload = {handle: document.getElementById('new-handle').value.trim(), display_name: document.getElementById('new-name').value.trim(), account_type: document.getElementById('new-type').value};
-  const response = await fetch('/api/v1/x/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-  if (response.ok) window.location.reload(); else showMessage('添加失败：' + ((await response.json()).detail || response.status));
+  button.disabled = true;
+  showMessage('正在添加账号…');
+  try {
+    await accountRequest('/api/v1/x/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    window.location.reload();
+  } catch (error) {
+    showMessage('添加失败：' + error.message);
+  } finally {
+    button.disabled = false;
+  }
 };
 </script>{% endblock %}

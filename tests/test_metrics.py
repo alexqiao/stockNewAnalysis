@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trade_news_analysis.models import Security, SecuritySignalSnapshot, SignalOutcome
+from trade_news_analysis.services.evaluation import EVALUATION_VERSION
+from trade_news_analysis.services.evidence import EVIDENCE_RULE_VERSION
 from trade_news_analysis.services.metrics import _rank_ic_summary, build_metrics
 
 
@@ -23,7 +26,8 @@ def metric_row(
         horizon=5,
         score=score,
         direction="bullish",
-        components={"research_score": score, "decision_score": score},
+        components={"research_score": score, "decision_score": score,
+                    "evidence_rule_version": EVIDENCE_RULE_VERSION},
     )
     outcome = SignalOutcome(snapshot=snapshot, excess_return_pct=excess_return)
     return outcome, snapshot, security
@@ -96,12 +100,14 @@ def test_build_metrics_uses_full_cross_section_for_rank_ic(session: Session) -> 
             confidence=0.8,
             conflict=0,
             rank=rank,
-            components={"research_score": score, "decision_score": score},
+            components={"research_score": score, "decision_score": score,
+                    "evidence_rule_version": EVIDENCE_RULE_VERSION},
         )
         session.add(snapshot)
         session.flush()
         session.add(
             SignalOutcome(
+                evaluation_version=EVALUATION_VERSION,
                 snapshot_id=snapshot.id,
                 baseline_at=as_of,
                 observed_at=observed_at,
@@ -152,12 +158,14 @@ def test_build_metrics_excludes_unranked_and_deduplicates_entry_session(
             direction="bullish",
             confidence=0.8,
             rank=1,
-            components={"research_score": 20 + offset, "decision_score": 20 + offset},
+            components={"research_score": 20 + offset, "decision_score": 20 + offset,
+                        "evidence_rule_version": EVIDENCE_RULE_VERSION},
         )
         session.add(snapshot)
         session.flush()
         session.add(
             SignalOutcome(
+                evaluation_version=EVALUATION_VERSION,
                 snapshot_id=snapshot.id,
                 baseline_at=baseline,
                 observed_at=baseline + timedelta(days=7),
@@ -181,12 +189,14 @@ def test_build_metrics_excludes_unranked_and_deduplicates_entry_session(
         direction="bearish",
         confidence=0.8,
         rank=None,
-        components={"research_score": -20, "decision_score": -20},
+        components={"research_score": -20, "decision_score": -20,
+                    "evidence_rule_version": EVIDENCE_RULE_VERSION},
     )
     session.add(unranked)
     session.flush()
     session.add(
         SignalOutcome(
+            evaluation_version=EVALUATION_VERSION,
             snapshot_id=unranked.id,
             baseline_at=baseline,
             observed_at=baseline + timedelta(days=7),
@@ -208,3 +218,79 @@ def test_build_metrics_excludes_unranked_and_deduplicates_entry_session(
 
     assert result["sample_size"] == 1
     assert result["decision_periods"] == 1
+
+
+@pytest.mark.parametrize("include_strict", [False, True])
+def test_metrics_keep_evaluation_versions_separate(
+    session: Session, include_strict: bool,
+) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security is not None
+    baseline = datetime(2026, 1, 6, 14, 30, tzinfo=UTC)
+    versions = [("legacy-v1", -5.0)]
+    if include_strict:
+        versions.insert(0, (EVALUATION_VERSION, 5.0))
+    for offset, (version, excess_return) in enumerate(versions):
+        snapshot = SecuritySignalSnapshot(
+            security_id=security.id, as_of=baseline - timedelta(hours=2 - offset),
+            horizon=5, score=70, direction="bullish", rank=1, confidence=0.8,
+            components={"decision_score": 70, "evidence_rule_version": (
+                EVIDENCE_RULE_VERSION if version == EVALUATION_VERSION else "legacy-v1"
+            )},
+        )
+        session.add(snapshot)
+        session.flush()
+        session.add(SignalOutcome(
+            snapshot_id=snapshot.id, evaluation_version=version,
+            baseline_at=baseline, observed_at=baseline + timedelta(days=7),
+            entry_price=100, exit_price=100 + excess_return,
+            benchmark_entry=100, benchmark_exit=100, return_pct=excess_return,
+            benchmark_return_pct=0, excess_return_pct=excess_return,
+            predicted_direction="bullish", actual_direction="bullish" if offset == 0 else "bearish",
+            correct=excess_return > 0,
+        ))
+    session.commit()
+
+    result = build_metrics(session, security_id=security.id)
+
+    assert result["evaluation_version"] == EVALUATION_VERSION
+    assert result["sample_size"] == int(include_strict)
+    assert result["average_excess_return_pct"] == (5.0 if include_strict else None)
+    versions_report = result["by_evaluation_version"]
+    assert versions_report["legacy-v1"]["sample_size"] == 1
+    assert versions_report["legacy-v1"]["average_excess_return_pct"] == -5
+    assert versions_report[EVALUATION_VERSION]["sample_size"] == int(include_strict)
+
+
+def test_same_validation_version_never_mixes_evidence_rules(session: Session) -> None:
+    security = session.scalar(select(Security).where(Security.symbol == "AAPL"))
+    assert security is not None
+    baseline = datetime(2026, 1, 6, 14, 30, tzinfo=UTC)
+    rules = [None, EVIDENCE_RULE_VERSION, "mixed:legacy-v1+original-sources-v2"]
+    for offset, rule in enumerate(rules):
+        components: dict[str, Any] = {"decision_score": 70}
+        if rule is not None:
+            components["evidence_rule_version"] = rule
+        snapshot = SecuritySignalSnapshot(
+            security_id=security.id, as_of=baseline - timedelta(hours=3 - offset),
+            horizon=1, score=70, direction="bullish", rank=1, components=components,
+        )
+        session.add(snapshot)
+        session.flush()
+        session.add(SignalOutcome(
+            snapshot_id=snapshot.id, evaluation_version=EVALUATION_VERSION,
+            baseline_at=baseline, observed_at=baseline + timedelta(hours=7),
+            entry_price=100, exit_price=101 + offset, benchmark_entry=100, benchmark_exit=100,
+            return_pct=1 + offset, benchmark_return_pct=0, excess_return_pct=1 + offset,
+            predicted_direction="bullish", actual_direction="bullish", correct=True,
+        ))
+    session.commit()
+    report = build_metrics(session)
+    assert report["sample_size"] == 1
+    assert report["average_excess_return_pct"] == 2
+    assert report["evidence_rule_version"] == EVIDENCE_RULE_VERSION
+    by_rule = report["by_evidence_rule_version"]
+    assert {key: group["sample_size"] for key, group in by_rule.items()} == {
+        "legacy-v1": 1, EVIDENCE_RULE_VERSION: 1, "mixed:legacy-v1+original-sources-v2": 1,
+    }
+    assert by_rule["legacy-v1"]["average_excess_return_pct"] == 1

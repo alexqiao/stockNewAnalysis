@@ -28,7 +28,7 @@ def sample_post() -> BrowserPost:
 
 def test_auto_falls_back_and_retries_browser_on_next_run(settings: Settings) -> None:
     fetcher = ResilientXFetcher(settings.model_copy(update={"x_fetch_mode": "auto"}))
-    browser = Mock(side_effect=XBrowserError("network", "浏览器网络失败"))
+    browser = Mock(side_effect=XBrowserError("browser", "浏览器启动失败"))
     public = Mock(return_value=[sample_post()])
     fetcher.browser.fetch = browser  # type: ignore[method-assign]
     fetcher.public.fetch = public  # type: ignore[method-assign]
@@ -43,9 +43,12 @@ def test_auto_falls_back_and_retries_browser_on_next_run(settings: Settings) -> 
     assert browser.call_count == 2
 
 
-def test_account_failure_does_not_disable_browser_for_other_accounts(settings: Settings) -> None:
+@pytest.mark.parametrize("code", ["http", "network", "page", "parse"])
+def test_account_failure_does_not_disable_browser_for_other_accounts(
+    settings: Settings, code: str,
+) -> None:
     fetcher = ResilientXFetcher(settings.model_copy(update={"x_fetch_mode": "auto"}))
-    browser = Mock(side_effect=[XBrowserError("http", "HTTP 404"), [sample_post()]])
+    browser = Mock(side_effect=[XBrowserError(code, "账号页面请求失败"), [sample_post()]])
     fetcher.browser.fetch = browser  # type: ignore[method-assign]
     fetcher.public.fetch = Mock(return_value=[sample_post()])  # type: ignore[method-assign]
 
@@ -53,6 +56,76 @@ def test_account_failure_does_not_disable_browser_for_other_accounts(settings: S
     fetcher.fetch("second")
     assert browser.call_count == 2
     assert fetcher.coverage == "curated"
+
+
+@pytest.mark.parametrize("failure", [
+    XBrowserError("browser", "浏览器启动失败"),
+    XBrowserError("auth", "登录已失效，请运行 uv run trade-news x-login"),
+    XBrowserError("proxy", "代理配置无效"),
+    RuntimeError("请运行 uv sync --extra social"),
+])
+def test_skipped_browser_retains_failure_until_next_run(
+    settings: Settings, failure: RuntimeError,
+) -> None:
+    fetcher = ResilientXFetcher(settings.model_copy(update={"x_fetch_mode": "auto"}))
+    browser = Mock(side_effect=[failure, [sample_post()]])
+    public = Mock(side_effect=[
+        [sample_post()],
+        XBrowserError("parse", "公开页面无帖子"),
+        XBrowserError("parse", "公开页面无帖子"),
+    ])
+    fetcher.browser.fetch = browser  # type: ignore[method-assign]
+    fetcher.public.fetch = public  # type: ignore[method-assign]
+
+    assert fetcher.fetch("first")
+    for handle in ("second", "third"):
+        with pytest.raises(XBrowserError) as caught:
+            fetcher.fetch(handle)
+        assert str(failure) in str(caught.value)
+        assert "公开页面无帖子" in str(caught.value)
+    assert browser.call_count == 1
+
+    fetcher.begin_run()
+    assert fetcher.fetch("first")
+    assert fetcher.coverage == "curated"
+    assert browser.call_count == 2
+    assert public.call_count == 3
+
+
+def test_network_and_public_failure_do_not_prevent_next_account_recovery(
+    settings: Settings,
+) -> None:
+    fetcher = ResilientXFetcher(settings.model_copy(update={"x_fetch_mode": "auto"}))
+    browser = Mock(side_effect=[
+        XBrowserError("network", "X 网络请求失败（net::ERR_HTTP_RESPONSE_CODE_FAILURE）"),
+        [sample_post()],
+    ])
+    public = Mock(side_effect=XBrowserError("parse", "公开页面无帖子"))
+    fetcher.browser.fetch = browser  # type: ignore[method-assign]
+    fetcher.public.fetch = public  # type: ignore[method-assign]
+
+    with pytest.raises(XBrowserError, match="ERR_HTTP_RESPONSE_CODE_FAILURE.*公开页面无帖子"):
+        fetcher.fetch("first")
+    assert fetcher.fetch("second")
+    assert fetcher.coverage == "curated"
+    assert browser.call_count == 2
+    public.assert_called_once_with("first")
+
+
+def test_suspended_account_does_not_fall_back_or_disable_other_accounts(
+    settings: Settings,
+) -> None:
+    fetcher = ResilientXFetcher(settings.model_copy(update={"x_fetch_mode": "auto"}))
+    browser = Mock(side_effect=[XBrowserError("account", "账号已停用"), [sample_post()]])
+    public = Mock(side_effect=AssertionError("unexpected fallback"))
+    fetcher.browser.fetch = browser  # type: ignore[method-assign]
+    fetcher.public.fetch = public  # type: ignore[method-assign]
+
+    with pytest.raises(XBrowserError, match="账号已停用"):
+        fetcher.fetch("first")
+    assert fetcher.fetch("second")
+    assert browser.call_count == 2
+    public.assert_not_called()
 
 
 @pytest.mark.parametrize("mode", ["browser", "public"])
@@ -136,6 +209,19 @@ def test_invalid_public_pages_never_succeed(
     with pytest.raises(XBrowserError) as caught:
         PublicProfileXFetcher(settings).fetch("example")
     assert caught.value.code == "parse"
+    assert response.closed
+
+
+def test_public_suspended_account_reports_account_error(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings,
+) -> None:
+    response = HtmlResponse(b"<main><h2>Account suspended</h2></main>")
+    mock_opener(monkeypatch, response)
+
+    with pytest.raises(XBrowserError, match="账号已停用") as caught:
+        PublicProfileXFetcher(settings).fetch("example")
+
+    assert caught.value.code == "account"
     assert response.closed
 
 

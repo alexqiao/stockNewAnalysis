@@ -61,7 +61,7 @@ def test_upgrade_handles_tables_created_before_migrations(
         assert "manual_price_updated_at" in profile_columns
         with engine.connect() as connection:
             assert connection.scalar(text("select version_num from alembic_version")) == (
-                "e2b7c4a91d60"
+                "e83f20a7b691"
             )
         engine.dispose()
     finally:

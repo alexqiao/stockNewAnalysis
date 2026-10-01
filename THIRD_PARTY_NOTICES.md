@@ -1,6 +1,6 @@
 # 第三方组件与方法声明
 
-本项目不复制下列仓库的大段源代码；组件通过正式依赖调用，统计方法在本项目中独立实现。
+除明确标注的本地打包资源外，组件通过正式依赖调用，统计方法在本项目中独立实现。
 
 ## Sentence Transformers
 
@@ -16,3 +16,21 @@
 - 许可证：MIT
 - 用途：参考其量化研究评估口径，对信号分数与前向超额收益计算横截面 Rank IC 和 ICIR。
 - 本项目未引入 Qlib 运行时依赖；ICIR 不做年化，并明确报告有效横截面数量。
+
+## TradingView Lightweight Charts™ 5.0.9
+
+Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/
+
+The unmodified standalone production build is included at
+`src/trade_news_analysis/static/lightweight-charts-5.0.9.standalone.production.js`.
+The full Apache License 2.0 and upstream NOTICE are included alongside it as
+`lightweight-charts-LICENSE.txt` and `lightweight-charts-NOTICE.txt`.
+The stock detail page also displays TradingView attribution and its link.
+
+- Project: https://github.com/tradingview/lightweight-charts/tree/v5.0.9
+- Build source: https://registry.npmjs.org/lightweight-charts/-/lightweight-charts-5.0.9.tgz
+- NOTICE source: https://raw.githubusercontent.com/tradingview/lightweight-charts/v5.0.9/NOTICE
+- npm tarball SHA-512: `8oQIis8jfZVfSwz8j9Z5x3O79dIRTkEYI9UY7DKtE4O3ZxlHjMK3L0+4nOVOOFq4FHI/oSIzz1RHeNImCk6/Jg==`
+
+This library renders locally stored price data. No third-party chart service is
+contacted when loading the stock detail page.

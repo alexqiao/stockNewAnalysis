@@ -1,7 +1,41 @@
+{% from "_workflow.html" import task_controls %}
 {% macro decision(judgment, security_id, signal, pe, compact=false) %}
 {% set action = judgment.action %}
+{% set brief = judgment.strategy.execution.brief if judgment.strategy else none %}
+{% if brief %}
+<div class="action-verdict decision-brief {{ judgment.strategy.execution.action_code }}" data-decision-brief>
+  <span>{{ judgment.strategy.horizon }} 日 · {{ {"unknown": "持仓待确认", "flat": "未持仓", "long": "已持仓", "short": "空头"}[action.holding_status] }}</span>
+  <strong>{{ brief.action }}</strong>
+  {% if brief.holdings_note %}<p class="muted" data-holdings-note>{{ brief.holdings_note }}</p>{% endif %}
+  <p><b>依据：</b>{{ brief.reason }}</p>
+  <p><b>下一步：</b>{{ brief.next_step }}
+    {% if brief.destination == 'holdings' %}<a href="/watchlist">核对持仓 →</a>
+    {% elif brief.destination == 'event' %}<a href="/events/{{ brief.event_id }}">核对原文 →</a>
+    {% elif brief.destination == 'calendar' %}<a href="/research?security_id={{ security_id }}#calendar">查看事件安排 →</a>
+    {% else %}<a href="/research?security_id={{ security_id }}#risk">打开研究工作台 →</a>{% endif %}
+  </p>
+  <p><b>重评条件：</b>{{ brief.change_when }}</p>
+  <small class="muted">{{ brief.review_when }} · {{ brief.quantity_note }}{% if brief.additional_risks %} · 另有 {{ brief.additional_risks }} 项风险，展开查看{% endif %}</small>
+</div>
+<details class="decision-detail"><summary>展开依据、触发条件与核验步骤</summary>
+{% endif %}
+{% if judgment.strategy %}{% set strategy = judgment.strategy %}
+<div class="action-verdict {{ strategy.execution.action_code }}"><span>{{ strategy.horizon }} 日行动判断</span><strong>{{ strategy.execution.next_action }}</strong>
+<p>{{ strategy.execution.reason }}</p>
+{% if strategy.execution.conditions %}
+<p><b>{{ '加仓条件' if action.holding_status == 'long' else '入场条件' }}：</b>{{ strategy.execution.conditions.add }}</p>
+<p><b>{{ '减仓 / 退出条件' if action.holding_status == 'long' else '风险变化时' }}：</b>{{ strategy.execution.conditions.reduce }}</p>
+{% if strategy.execution.conditions.review %}<p><b>判断改变时：</b>{{ strategy.execution.conditions.review }}</p>{% endif %}
+<p class="muted">{{ strategy.execution.conditions.recheck }}</p>
+{% endif %}
+{% if strategy.execution.event_reference and strategy.execution.event_reference.id %}<a href="/events/{{ strategy.execution.event_reference.id }}">核对本次条件对应的事件 →</a>{% endif %}
+<p class="muted">{{ strategy.execution.label }}{% if not strategy.execution.ready %}；当前方向不代表已具备下单条件。{% endif %}</p>
+{% if strategy.execution.blockers %}<details><summary>具体待解决条件</summary><ul>{% for item in strategy.execution.blockers %}<li>{{ item }}</li>{% endfor %}</ul></details>{% endif %}
+<a href="/research?security_id={{ security_id }}#risk">查看持仓、修改参数与测算股数 →</a></div>
+{% endif %}
+<details class="research-details"><summary>原规则对照：{{ action.label }}</summary>
 <div class="action-verdict {{ action.code }}">
-  <span>当前行动 · {{ {"unknown": "持仓未填写", "flat": "未持仓", "long": "已持仓"}[action.holding_status] }}</span>
+  <span>当前行动 · {{ {"unknown": "持仓未填写", "flat": "未持仓", "long": "已持仓", "short": "空头持仓"}[action.holding_status] }}</span>
   <strong>{{ action.label }}</strong>
   <p>{{ action.reason }}</p>
 </div>
@@ -11,21 +45,54 @@
 {% if action.flat_action.blockers %}<p class="muted"><strong>买入还需解决：</strong>{{ (action.flat_action.blockers[:2] if compact else action.flat_action.blockers)|join('；') }}</p>{% endif %}
 {% if not compact %}<p class="muted"><strong>持仓情景：</strong>{{ action.long_action.reason }}{% if action.long_action.blockers %} {{ action.long_action.blockers|join('；') }}{% endif %}</p>{% endif %}
 {% endif %}
-{% if action.blockers %}<div class="decision-blockers"><strong>尚未满足</strong><ul>{% for reason in (action.blockers[:3] if compact else action.blockers) %}<li>{{ reason }}</li>{% endfor %}</ul></div>{% endif %}
+{% if action.blockers %}<details class="decision-blockers"><summary>为什么当前条件未满足 · {{ action.blockers|length }} 项</summary><ul>{% for reason in action.blockers %}<li>{{ reason }}</li>{% endfor %}</ul></details>{% endif %}
+</details>
+{% if action.plan %}
+<section class="action-plan"{% if not compact %} id="action-plan"{% endif %}>
+  <h3>现在具体做什么 · {{ action.plan.horizon }} 日评估</h3>
+  {% set visible_tasks = (action.plan.tasks|rejectattr('kind', 'equalto', 'position_risk')|list) if compact else action.plan.tasks %}
+  {% for task in (visible_tasks[:2] if compact else visible_tasks) %}
+  <article class="action-task">
+    <strong>{{ loop.index }}. {{ task.title }}</strong>
+    {% if task.reference %}<p class="muted">对应线索：{{ task.reference }}</p>{% endif %}
+    <p>{{ task.detail }}</p>
+    <p class="muted">检查时间：{{ task.when }} · {{ task.status_label }}</p>
+    {% if not compact %}
+    <p><strong>核实后：</strong>{{ task.on_pass }}</p>
+    <p><strong>未满足：</strong>{{ task.on_fail }}</p>
+    {{ task_controls(task) }}
+    {% endif %}
+    {% if task.source_kind == 'event' %}<a href="/events/{{ task.source_id }}">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'post' %}<a href="/x?post_id={{ task.source_id }}#post-{{ task.source_id }}">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'valuation' %}<a href="/securities/{{ security_id }}#pe-analysis">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'watchlist' %}<a href="/watchlist">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'research' %}<a href="/research?security_id={{ security_id }}#risk">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'research_calendar' %}<a href="/research?security_id={{ security_id }}#calendar">{{ task.source_label }} →</a>
+    {% elif task.source_kind == 'status' %}<a href="/status">{{ task.source_label }} →</a>{% endif %}
+  </article>
+  {% endfor %}
+  {% if compact %}<a href="/securities/{{ security_id }}?horizon={{ action.plan.horizon }}#action-plan">查看完整核验步骤与判断失效条件 →</a>
+  {% else %}{% if action.plan.needs_refresh %}<button class="secondary" data-workflow-capture>保存 / 更新行动计划</button>{% endif %}<p class="muted">{{ action.plan.review_when }}</p><p class="muted">{{ action.plan.calendar_note }}</p><p class="muted">{{ action.plan.quantity_note }}</p>{% endif %}
+</section>
+{% endif %}
 {% if not compact %}
+<details><summary>原规则的通用条件与阈值</summary>
 <div class="decision-conditions">
   <div><h3>买入前确认</h3><ul>{% for condition in action.entry_conditions %}<li>{{ condition }}</li>{% endfor %}</ul></div>
   <div><h3>持有 / 退出条件</h3><ul>{% for condition in action.exit_conditions %}<li>{{ condition }}</li>{% endfor %}</ul></div>
 </div>
 {% if action.next_steps %}<h3>下一步</h3><ul>{% for step in action.next_steps %}<li>{{ step }}</li>{% endfor %}</ul>{% endif %}
 <p class="muted">{{ action.policy_note }}</p>
+</details>
+{% if judgment.strategy %}<p class="muted">{{ judgment.strategy.method_note }}</p>{% endif %}
 {% endif %}
-<p class="decision-times muted">信号：{{ signal.as_of if signal else '暂无' }} · 价格确认：{{ pe.price_as_of or '待刷新' }}</p>
+<p class="decision-times muted">信号：{{ signal.as_of if signal else '暂无' }} · {% if judgment.strategy %}最近日线：{{ judgment.strategy.execution.quote_as_of or '待刷新' }}{% else %}价格确认：{{ pe.price_as_of or '待刷新' }}{% endif %}</p>
 <details class="research-details"><summary>查看新闻证据与 PE 假设</summary>
   <p><strong>原始研究合成：</strong>{{ judgment.label }}</p><p>{{ judgment.summary }}</p>
   {% if judgment.key_events %}<p><strong>主要事件：</strong>{{ judgment.key_events|join("；") }}</p>{% endif %}
   <a href="/securities/{{ security_id }}#pe-analysis">核对估值输入 →</a>
 </details>
+{% if brief %}</details>{% endif %}
 {% endmacro %}
 
 {% macro social_context(social, compact=false) %}

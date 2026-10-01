@@ -124,6 +124,36 @@ def ready_watchlist(client: TestClient, security_id: int, holding_status: str) -
     return summary
 
 
+def test_action_plan_exposes_neutral_event_checks_and_horizon_on_page(
+    decisions_client: TestClient, decision_security: tuple[int, int],
+    session_factory: SessionFactory,
+) -> None:
+    security_id, impact_id = decision_security
+    ready_watchlist(decisions_client, security_id, "long")
+    with session_factory() as session:
+        impact = session.get(EventSecurityImpact, impact_id)
+        assert impact is not None
+        impact.impacts = {
+            str(h): {"direction": "neutral", "confidence": 0.3, "reason": "等待交付"}
+            for h in (1, 5, 20)
+        }
+        event_id = impact.event_id
+        session.commit()
+        rebuild_signal_snapshots(session)
+    response = decisions_client.get(f"/api/v1/securities/{security_id}?horizon=20")
+    action = response.json()["judgment"]["action"]
+    assert action["code"] == "review"
+    assert action["plan"]["horizon"] == 20
+    assert any(task["source_id"] == event_id for task in action["plan"]["tasks"])
+    page = decisions_client.get(f"/securities/{security_id}?horizon=20")
+    assert page.status_code == 200
+    assert "现在具体做什么 · 20 日评估" in page.text
+    assert "订单开始交付" in page.text
+    assert "公司公告取消订单" in page.text
+    assert f'/events/{event_id}' in page.text
+    assert 'id="action-plan"' in page.text
+
+
 @pytest.mark.parametrize("holding_status", ["flat", "long"])
 @pytest.mark.parametrize("horizon", [1, 5, 20])
 def test_decisions_match_between_watchlist_security_api_and_pages(
@@ -196,7 +226,7 @@ def test_default_five_day_buy_candidate_and_legacy_holding_updates(
 
     invalid_response = decisions_client.put(
         "/api/v1/watchlist",
-        json={"items": [{"security_id": security_id, "holding_status": "short"}]},
+        json={"items": [{"security_id": security_id, "holding_status": "invalid"}]},
     )
     assert invalid_response.status_code == 422
     assert decisions_client.get("/api/v1/watchlist").json()[0]["holding_status"] == "long"

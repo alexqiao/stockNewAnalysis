@@ -21,7 +21,8 @@
     <div class="meta"><span>{{ item.security.market }} · {{ item.security.symbol }}</span><span>{{ horizon }} 日</span></div>
     <h2><a href="/securities/{{ item.security.id }}">{{ item.security.name }}</a></h2>
     {{ decision(item.judgment, item.security_id, item.signal, item.pe_analysis, compact=true) }}
-    <div class="horizon-comparison">{% for h in [1, 5, 20] %}<a href="/securities/{{ item.security_id }}?horizon={{ h }}">{{ h }} 日 · {{ item.judgments[h|string].action.label }}</a>{% endfor %}</div>
+    <details class="research-details"><summary>其他周期与博主线索</summary>
+    <div class="horizon-comparison">{% for h in [1, 5, 20] %}{% set strategy = item.judgments[h|string].strategy %}<a href="/securities/{{ item.security_id }}?horizon={{ h }}">{{ h }} 日 · {{ strategy.candidate.label }}<br>{{ strategy.execution.horizon_focus }}</a>{% endfor %}</div>
     {% if item.invalidated_horizons %}<p class="notice">原信号包含已撤销证据，已暂停使用，请重新分析。</p>{% endif %}
     {{ social_context(item.social, compact=true) }}
     {% if item.judgment.macro %}
@@ -30,6 +31,7 @@
       <span>{{ item.judgment.macro.direction_note }}</span>
     </p>
     {% endif %}
+    </details>
     <a class="judgment-detail" href="/securities/{{ item.security.id }}?horizon={{ horizon }}">查看买入与退出条件 →</a>
   </article>
   {% endfor %}
@@ -110,32 +112,46 @@ themeSearch.addEventListener('input', function () {
     } catch (error) { /* Exact theme names can still be submitted if suggestions fail. */ }
   }, 220);
 });
-document.getElementById('ingest-button').addEventListener('click', async function () {
-  const button = this;
+document.addEventListener('DOMContentLoaded', function () {
+  const button = document.getElementById('ingest-button');
   const message = document.getElementById('run-message');
-  button.disabled = true;
-  message.classList.remove('hidden');
-  message.textContent = '正在创建采集任务…';
-  try {
-    const response = await fetch('/api/v1/runs/ingest', {method: 'POST'});
-    const data = await response.json();
-    if (!response.ok) { message.textContent = data.detail || '启动失败'; return; }
-    while (true) {
-      message.textContent = '任务 #' + data.id + ' 正在采集和聚合…';
-      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
-      const runResponse = await fetch('/api/v1/runs/' + data.id);
-      const run = await runResponse.json();
-      if (['complete', 'partial', 'failed'].includes(run.status)) {
-        message.textContent = '任务完成：新增 ' + run.articles_new + ' 条新闻，生成/更新 ' + run.analyses_created + ' 个事件。';
-        window.location.reload();
-        return;
+  const storageKey = 'pipeline-run';
+  const phases = {ingestion: '采集', analysis: '分析', snapshots: '保存快照', evaluation: '验证', finished: '已结束'};
+  function follow(runId) {
+    button.disabled = true;
+    message.classList.remove('hidden');
+    RunPoller.start({runId, storageKey,
+      onUpdate(run) { message.textContent = '任务 #' + run.id + ' · ' + (phases[run.phase] || run.phase || run.status); },
+      onComplete(run) {
+        button.disabled = false;
+        const labels = {complete: '完成', completed: '完成', partial: '部分完成', failed: '失败'};
+        message.textContent = '任务' + (labels[run.status] || run.status) + '：新增 ' + run.articles_new + ' 条新闻。' + (run.errors || []).join('；');
+        const link = document.createElement('a');
+        link.href = window.location.href; link.textContent = ' 刷新结果'; message.append(link);
+      },
+      onError(error) {
+        button.disabled = false;
+        message.textContent = '暂时无法获取进度：' + error.message + '。后台任务可能仍在运行，刷新页面可继续跟踪。';
       }
-    }
-  } catch (error) {
-    message.textContent = '启动失败：' + error;
-  } finally {
-    button.disabled = false;
+    });
   }
+  button.addEventListener('click', async function () {
+    if (button.disabled) return;
+    const existing = RunPoller.restore(storageKey);
+    if (existing) { follow(existing); return; }
+    button.disabled = true;
+    message.classList.remove('hidden');
+    message.textContent = '正在创建采集任务…';
+    try {
+      const data = await RunPoller.request('/api/v1/runs/ingest', {method: 'POST'});
+      follow(data.id);
+    } catch (error) {
+      message.textContent = '启动失败：' + error.message;
+      button.disabled = false;
+    }
+  });
+  const existing = RunPoller.restore(storageKey);
+  if (existing) follow(existing);
 });
 </script>
 {% endblock %}

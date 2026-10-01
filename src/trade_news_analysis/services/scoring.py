@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import Event, EventSecurityImpact, Security, SecuritySignalSnapshot
-from .evidence import is_narrative_only
+from .evidence import EVIDENCE_RULE_VERSION, is_narrative_only
 
 HORIZONS = (1, 5, 20)
 SIGNAL_TTL_MULTIPLIER = 3
@@ -27,6 +27,20 @@ SCORE_WEIGHTS = {
     "verification_speed": 5.0,
 }
 DIRECTION_SIGN = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+
+
+def evidence_rule_version(components: Mapping[str, Any] | None) -> str:
+    """Keep legacy and mixed evidence distinct, including scoped signal components."""
+    components = components or {}
+    events = components.get("events")
+    versions = {
+        str(item.get("evidence_rule_version") or "legacy-v1")
+        for item in events or []
+        if isinstance(item, Mapping) and not item.get("expired")
+    } if isinstance(events, list) else set()
+    if versions:
+        return next(iter(versions)) if len(versions) == 1 else "mixed:" + "+".join(sorted(versions))
+    return str(components.get("evidence_rule_version") or "legacy-v1")
 
 
 def calculate_opportunity_score(values: Mapping[str, float], risk_penalty: float) -> float:
@@ -72,8 +86,9 @@ def event_is_available(event: Event, as_of: datetime) -> bool:
         event.status != "excluded"
         and not is_narrative_only(event)
         and (
-            event.occurred_at is None
-            or _utc(event.occurred_at) <= _utc(as_of) + timedelta(minutes=5)
+            (event.first_disclosed_at or event.occurred_at) is None
+            or _utc(event.first_disclosed_at or event.occurred_at)  # type: ignore[arg-type]
+            <= _utc(as_of) + timedelta(minutes=5)
         )
     )
 
@@ -149,7 +164,7 @@ def aggregate_security(
         confidence = float(horizon_impact["confidence"])
         direction = str(horizon_impact["direction"])
         age_sessions = trading_sessions_since(
-            item.event.occurred_at or item.created_at, as_of
+            item.event.first_disclosed_at or item.event.occurred_at or item.created_at, as_of
         )
         expired = age_sessions > horizon * SIGNAL_TTL_MULTIPLIER
         decay = 0.0 if expired else freshness_decay(age_sessions, horizon)
@@ -159,6 +174,7 @@ def aggregate_security(
         contributions.append(
             {
                 "event_id": item.event_id,
+                "evidence_rule_version": item.evidence_rule_version or "legacy-v1",
                 "direction": direction,
                 "opportunity_score": item.opportunity_score,
                 "confidence": confidence,
@@ -189,6 +205,7 @@ def aggregate_security(
         conflict=round(conflict, 4),
         evidence_event_ids=active_event_ids,
         components={
+            "evidence_rule_version": evidence_rule_version({"events": contributions}),
             "research_score": round(research_score, 2),
             "decision_score": round(score, 2),
             "events": contributions,
@@ -255,7 +272,8 @@ def rebuild_signal_snapshots(
                     conflict=0.0,
                     rank=None,
                     evidence_event_ids=[],
-                    components={"research_score": 0.0, "decision_score": 0.0, "events": []},
+                    components={"research_score": 0.0, "decision_score": 0.0, "events": [],
+                                "evidence_rule_version": EVIDENCE_RULE_VERSION},
                 )
             if snapshot and (
                 previous is None or _snapshot_state(previous) != _snapshot_state(snapshot)

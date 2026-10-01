@@ -11,7 +11,7 @@
 <section class="analysis-panel">
   <h2>所属事件</h2>
   {% for event in article.events %}
-  <article class="impact-row"><div><a href="/events/{{ event.id }}"><strong>{{ event.title }}</strong></a><div class="signals">{% for theme in event.themes %}<span class="tag">{{ theme }}</span>{% endfor %}</div></div><span class="direction pending">{{ event.status }}</span></article>
+  <article class="impact-row"><div><a href="/events/{{ event.id }}"><strong>{{ event.title }}</strong></a><div class="signals">{% for theme in event.themes %}<span class="tag">{{ theme }}</span>{% endfor %}</div></div><span class="direction pending">{{ {'pending': '等待分析', 'analyzing': '分析中', 'complete': '已完成', 'partial': '部分完成', 'error': '分析失败'}.get(event.status, event.status) }}</span></article>
   {% else %}<div class="empty">该证据尚未聚合为事件。</div>{% endfor %}
 </section>
 {% endblock %}

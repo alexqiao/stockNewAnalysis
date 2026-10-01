@@ -1,0 +1,122 @@
+{% set task_labels = {'pending': '待核实', 'done': '已完成核验', 'dismissed': '已搁置', 'expired': '已过期'} %}
+{% set claim_labels = {'pending': '待核实', 'partially_supported': '部分有依据', 'verified': '已人工核实', 'refuted': '已被反证', 'expired': '已过期'} %}
+{% set audit_labels = {'created': '建立核验项', 'manual_review': '人工更新', 'source_changed': '来源变化，重新核验', 'restored': '恢复核验', 'deadline': '复核期限已到', 'not_in_plan': '已不在当前行动计划', 'source_unavailable': '原始来源已不可用'} %}
+
+{% macro audit_history(history, labels, history_url=none) %}
+<details class="research-details workflow-history"{% if history_url %} data-workflow-history-url="{{ history_url }}"{% endif %}><summary>{% if history_url %}最近核验记录（展开读取全部）{% else %}核验记录 · <span data-history-count>{{ history|length }}</span> 条{% endif %}</summary>
+  <ol data-workflow-history>
+  {% for entry in history|reverse %}<li>
+    <p><time data-workflow-time datetime="{{ entry.created_at }}">{{ entry.created_at }}</time> · {{ audit_labels.get(entry.reason, entry.reason) }}</p>
+    <p>{{ labels.get(entry.from_status, '未建立') }} → {{ labels.get(entry.to_status, entry.to_status) }}{% if entry.note %} · {{ entry.note }}{% endif %}</p>
+    {% if entry.snapshot %}
+    {% if entry.snapshot.claim_text %}<p class="muted">当时主张：{{ entry.snapshot.claim_text }}</p>{% elif entry.snapshot.payload %}<p class="muted">当时核验项：{{ entry.snapshot.payload.detail }}</p>{% endif %}
+    {% if entry.snapshot.evidence %}<ul>{% for evidence in entry.snapshot.evidence %}<li>{{ '支持' if evidence.stance == 'support' else '反证' }} · <a href="{{ evidence.source_url or evidence.url }}" target="_blank" rel="noopener noreferrer">当时引用来源 ↗</a> · {{ evidence.note }}</li>{% endfor %}</ul>{% endif %}
+    {% endif %}
+  </li>{% endfor %}
+  </ol>
+</details>
+{% endmacro %}
+
+{% macro task_controls(task) %}
+<div class="workflow-task" data-workflow-item="task" data-workflow-id="{{ task.id or '' }}">
+  <p class="muted"><strong data-workflow-status>{{ task.status_label or task_labels.get(task.status, '待核实') }}</strong>{% if task.review_due_at %} · 复核期限：<time data-workflow-due data-workflow-time datetime="{{ task.review_due_at }}">{{ task.review_due_at }}</time>{% endif %}</p>
+  <p data-workflow-note{% if not task.note %} hidden{% endif %}>{{ task.note or '' }}</p>
+  {% if not task.id or task.needs_refresh %}
+  <p class="notice">{{ '来源或期限已有变化，请先刷新保存，再记录新的核验结果。' if task.id else '先保存当前自选行动，完成状态和核验记录才会保留。' }} 非自选证券请先<a href="/watchlist">加入自选</a>。</p>
+  <button type="button" class="secondary" data-workflow-capture>刷新并保存当前自选行动</button>
+  <p data-workflow-message role="status" aria-live="polite" hidden></p>
+  {% else %}
+  <details class="research-details"><summary>记录核验结果 / 修改复核期限</summary>
+    <form data-workflow-form="task" data-record-id="{{ task.id }}" data-revision="{{ task.revision or 1 }}" data-current-due="{{ task.review_due_at or '' }}">
+      <div class="pe-input-grid">
+        <label>检查进度<select name="status" required>{% for value, label in task_labels.items() %}<option value="{{ value }}"{% if task.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+        <label>新的复核期限（本机时区，留空保留）<input type="datetime-local" name="review_due_at"></label>
+      </div>
+      <p><label>核验依据或搁置原因<br><textarea name="note" rows="3" cols="60" maxlength="3000" required placeholder="具体核对了哪些原始资料，结果是什么？">{{ task.note or '' }}</textarea></label></p>
+      <p class="muted">待核实：还没查清；已完成核验：已完成这次检查，请在备注写明支持还是不支持原假设；已搁置：暂不跟踪并说明原因；已过期：期限已到或已不适用于当前计划。</p>
+      <p class="muted">“已完成核验”不表示事件一定发生，也不会直接改成买入或卖出。仍需按最新事实、价格和风险条件重新判断。</p>
+      <button type="submit" class="primary">保存核验结果</button>
+      <p data-workflow-message role="status" aria-live="polite" hidden></p>
+    </form>
+  </details>
+  {% endif %}
+  {{ audit_history(task.history or [], task_labels) }}
+</div>
+{% endmacro %}
+
+{% macro evidence_row(evidence=none) %}
+<fieldset data-evidence-row class="pe-overrides">
+  <legend>核验材料</legend>
+  <div class="pe-input-grid">
+    <label>材料链接<input type="url" data-evidence-field="url" required placeholder="https://…" value="{{ evidence.url if evidence else '' }}"></label>
+    <label>最初披露链接（转述请填写原始出处）<input type="url" data-evidence-field="source_url" placeholder="留空使用材料链接" value="{{ evidence.source_url if evidence else '' }}"></label>
+    <label>对该主张的作用<select data-evidence-field="stance"><option value="support"{% if not evidence or evidence.stance == 'support' %} selected{% endif %}>支持</option><option value="conflict"{% if evidence and evidence.stance == 'conflict' %} selected{% endif %}>反证 / 冲突</option></select></label>
+  </div>
+  <p><label><input type="checkbox" data-evidence-field="is_official"{% if evidence and evidence.is_official %} checked{% endif %}>我已确认这是公司、监管机构或其他一手官方披露</label></p>
+  <p><label>材料具体支持或反驳了什么<br><textarea data-evidence-field="note" rows="2" cols="60" maxlength="3000" required placeholder="填写对应段落、数据、日期，以及与主张一致或冲突的部分">{{ evidence.note if evidence else '' }}</textarea></label></p>
+  <button type="button" class="secondary" data-remove-evidence>从本次证据列表移除</button>
+</fieldset>
+{% endmacro %}
+
+{% macro claims_panel(claims) %}
+<section class="workflow-claims" id="claim-verification">
+  <h2>X 主张核验</h2>
+  <p class="muted">逐项对照原始披露。相同原始出处的多篇转述只计一份独立材料；候选链接仅供查阅，人工确认后才记录支持或反证。</p>
+  <details class="research-details"><summary>这些核验状态是什么意思？</summary><ul>
+    <li>待核实：已有线索，关键依据尚未查清。</li>
+    <li>部分有依据：只有部分内容得到支持，仍有重要细节待查。</li>
+    <li>已人工核实：已保存支持主张的官方材料，并处理官方反证；不代表股价一定上涨。</li>
+    <li>已被反证：已保存与主张矛盾的官方材料，应重新评估原假设。</li>
+    <li>已过期：超过复核期限，或来源失效；不等于主张已被证明错误。</li>
+  </ul><p class="muted">这些状态记录证据核对进度，不是买卖结论。</p></details>
+  {% for claim in claims %}
+  <article class="analysis-panel social-post" data-workflow-item="claim" data-workflow-id="{{ claim.id }}" id="claim-{{ claim.id }}">
+    <div class="meta"><a href="{{ claim.post_url }}" target="_blank" rel="noopener noreferrer">@{{ claim.author }} · 原帖 ↗</a><time data-workflow-time datetime="{{ claim.published_at }}">{{ claim.published_at }}</time></div>
+    <h3>{{ claim.claim_text }}</h3>
+    <p><strong data-workflow-status>{{ claim.status_label or claim_labels.get(claim.status, '待核实') }}</strong> · 复核期限：<time data-workflow-due data-workflow-time datetime="{{ claim.review_due_at }}">{{ claim.review_due_at }}</time></p>
+    <p class="muted">{{ claim.review_calendar_note or '' }}</p>
+    {% if claim.source_truncated %}<p class="notice">原帖正文有截断，当前主张可能缺少上下文。请打开完整原帖，并核对官方披露后再下核验结论。</p>{% endif %}
+    {% if claim.claim_kind == 'summary_to_verify' %}<p class="muted">这条核验项来自筛选摘要，其中的预测或观点仍需核实。</p>{% endif %}
+    {% if claim.verification_needs %}<p><strong>待核实：</strong>{{ claim.verification_needs|join('；') }}</p>{% endif %}
+    <p data-workflow-note{% if not claim.note %} hidden{% endif %}>{{ claim.note or '' }}</p>
+    <p class="muted" data-evidence-counts>独立材料 {{ claim.independent_evidence_count }} 份 · 官方支持 {{ claim.official_support_count }} 份 · 官方反证 {{ claim.official_conflict_count }} 份</p>
+    <ul data-evidence-summary>{% for item in claim.evidence %}<li><strong>{{ '支持' if item.stance == 'support' else '反证 / 冲突' }}</strong> · {{ '已人工确认官方来源' if item.is_official else '尚非官方确认' }} · <a href="{{ item.source_url or item.url }}" target="_blank" rel="noopener noreferrer">原始出处 ↗</a><p>{{ item.note }}</p></li>{% endfor %}</ul>
+    {% if claim.source_snapshot %}<details class="research-details"><summary>查看保存的原帖正文</summary><p>{{ claim.source_snapshot.text }}</p>{% if claim.source_snapshot.quoted_text %}<blockquote>{{ claim.source_snapshot.quoted_text }}</blockquote>{% endif %}</details>{% endif %}
+    {% if claim.securities %}<p class="muted">关联证券：{% for item in claim.securities %}<a href="/securities/{{ item.security_id }}">证券 #{{ item.security_id }} · {{ {'entity': '直接提及', 'event': '关联事件', 'theme': '主题参考'}.get(item.match_basis, '研究关联') }}</a>{% if not loop.last %}；{% endif %}{% endfor %}</p>{% endif %}
+    {% if claim.suggested_sources %}
+    <details class="research-details"><summary>可查阅资料 · {{ claim.suggested_sources|length }} 条建议</summary>
+      <p class="muted">关键词相似不能证明主张成立；加入下方材料列表后仍须填写核验说明并手动保存。</p>
+      <ul>{% for source in claim.suggested_sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }} ↗</a> · {{ source.reason }}{% if not claim.needs_refresh %} <button type="button" class="secondary" data-add-candidate data-candidate-url="{{ source.url }}">填入材料列表</button>{% endif %}</li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+    {% if claim.needs_refresh %}
+    <p class="notice">来源已有变化，请先刷新主张清单，再核验新的内容。</p>
+    <button type="button" class="secondary" data-workflow-capture>刷新并保存当前研究</button>
+    <p data-workflow-message role="status" aria-live="polite" hidden></p>
+    {% else %}
+    <details class="research-details" data-claim-editor><summary>记录核验结论 / 编辑支持与反证材料</summary>
+      <form data-workflow-form="claim" data-record-id="{{ claim.id }}" data-revision="{{ claim.revision or 1 }}" data-current-due="{{ claim.review_due_at or '' }}">
+        <div class="pe-input-grid">
+          <label>证据核验结论<select name="status" required>{% for value, label in claim_labels.items() %}<option value="{{ value }}"{% if claim.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+          <label>新的复核期限（本机时区，留空保留）<input type="datetime-local" name="review_due_at"></label>
+        </div>
+        <p><label>核验结论与依据<br><textarea name="note" rows="3" cols="60" maxlength="3000" required placeholder="说明哪些部分得到支持，哪些仍缺依据，是否存在相反披露">{{ claim.note or '' }}</textarea></label></p>
+        <p class="muted">下方是本次保存的完整材料列表。删除的材料不再用于当前结论，旧版本仍保留在核验记录中。</p>
+        <div data-evidence-list>{% for item in claim.evidence %}{{ evidence_row(item) }}{% endfor %}</div>
+        <template data-evidence-template>{{ evidence_row() }}</template>
+        <button type="button" class="secondary" data-add-evidence>添加支持 / 反证材料</button>
+        <p class="muted">“已人工核实”需要官方支持材料，并先处理官方反证；“已被反证”需要官方反证材料。保存核验不会自动纳入正式评分。</p>
+        <button type="submit" class="primary">保存主张核验</button>
+        <p data-workflow-message role="status" aria-live="polite" hidden></p>
+      </form>
+    </details>
+    {% endif %}
+    {{ audit_history(claim.history or [], claim_labels, "/api/v1/research/claims/" ~ claim.id if claim.history_deferred else none) }}
+  </article>
+  {% else %}
+  <div class="empty">尚无已保存的待核验主张。先采集并筛选 X 帖子，再刷新保存当前研究。</div>
+  <button type="button" class="secondary" data-workflow-capture>刷新并保存当前研究</button>
+  <p data-workflow-message role="status" aria-live="polite" hidden></p>
+  {% endfor %}
+</section>
+{% endmacro %}

@@ -31,8 +31,10 @@ from ..models import (
 )
 from ..schemas import XPostScreeningPayload
 from .analysis import extract_json
+from .analysis_versions import invalidate_event_analysis
 from .ingestion import IngestionService
 from .normalization import NormalizedArticle, clean_text, json_safe, normalize_url, parse_datetime
+from .x_html import XProfileUnavailableError, check_profile_availability
 
 POST_ID_RE = re.compile(r"/status/(\d+)")
 TRUSTED_ACCOUNT_TYPES = {"company", "regulator", "media"}
@@ -203,14 +205,19 @@ class PlaywrightXFetcher:
                             raise XBrowserError(
                                 "auth", "X 登录已失效，请运行 uv run trade-news x-login"
                             )
-                        page.wait_for_selector(
-                            'article', timeout=20_000
-                        )
+                        try:
+                            page.wait_for_selector('article', timeout=20_000)
+                        except Exception:
+                            try:
+                                check_profile_availability(page.content())
+                            except XProfileUnavailableError as exc:
+                                raise XBrowserError("account", str(exc)) from None
+                            raise
                         last_error = None
                         break
                     except Exception as exc:
                         last_error = exc
-                        if isinstance(exc, XBrowserError) and exc.code == "auth":
+                        if isinstance(exc, XBrowserError) and exc.code in {"auth", "account"}:
                             raise
                         page.wait_for_timeout(5_000)
                 if last_error is not None:
@@ -455,6 +462,8 @@ class PublicProfileXFetcher:
             raise XBrowserError("network", "X 公开页面请求失败，请检查代理连通性") from None
         try:
             payloads = parse_public_profile(html, handle)
+        except XProfileUnavailableError as exc:
+            raise XBrowserError("account", str(exc)) from None
         except ValueError:
             raise XBrowserError(
                 "parse", "X 公开页面没有可解析帖子；账号可能受限或需要登录，请尝试浏览器模式"
@@ -471,10 +480,10 @@ class ResilientXFetcher:
         self.browser = PlaywrightXFetcher(settings)
         self.public = PublicProfileXFetcher(settings)
         self.coverage = "curated"
-        self._browser_unavailable = False
+        self._browser_unavailable_error: RuntimeError | None = None
 
     def begin_run(self) -> None:
-        self._browser_unavailable = False
+        self._browser_unavailable_error = None
 
     def fetch(self, handle: str) -> list[BrowserPost]:
         self.coverage = "curated"
@@ -483,17 +492,19 @@ class ResilientXFetcher:
             return self.public.fetch(handle)
         if self.settings.x_fetch_mode == "browser":
             return self._fetch_browser(handle)
-        browser_error: RuntimeError | None = None
-        if not self._browser_unavailable:
+        browser_error = self._browser_unavailable_error
+        if browser_error is None:
             try:
                 return self._fetch_browser(handle)
             except RuntimeError as exc:
+                if isinstance(exc, XBrowserError) and exc.code == "account":
+                    raise
                 browser_error = exc
                 if not isinstance(exc, XBrowserError) or exc.code in {
-                    "network", "browser", "auth", "proxy"
+                    "browser", "auth", "proxy"
                 }:
-                    # Retry the browser on the next run, not for every account this run.
-                    self._browser_unavailable = True
+                    # Only session/setup failures apply to every account in this run.
+                    self._browser_unavailable_error = exc
         self.coverage = "public_page"
         try:
             return self.public.fetch(handle)
@@ -626,6 +637,21 @@ class XIngestionService:
                 return post, False
             if was_truncated and not is_truncated and post.screening_status == "review":
                 post.screening = {}
+            if post.related_event_id is not None and (
+                post.text != item.text or post.quoted_text != item.quoted_text
+                or post.quoted_post_id != item.quoted_post_id
+                or post.quoted_author_handle != item.quoted_author_handle
+                or post.external_links != item.external_links
+                or was_truncated != is_truncated
+            ):
+                if post.promoted_article_id is not None:
+                    article = session.get(Article, post.promoted_article_id)
+                    if article is not None:
+                        article.analysis_eligible = False
+                invalidate_event_analysis(
+                    session, [post.related_event_id], "原始帖子内容已变化，请重新核验",
+                )
+            post.screening_version += 1
         if post is None:
             post = XPost(
                 account_id=account.id,
@@ -748,6 +774,9 @@ class XIngestionService:
                 .where(EventArticle.article_id == article.id)
             )
             assert event is not None
+        article.title = payload.title
+        article.summary = payload.summary
+        article.raw_data = payload.raw_data
         article.content_kind = "social_post"
         article.evidence_role = (
             "official_primary"
@@ -761,20 +790,20 @@ class XIngestionService:
         post.promoted_article_id = article.id
         post.related_event_id = event.id
         post.screening_status = "promoted"
-        event.status = "pending"
+        has_analysis = session.scalar(select(EventSecurityImpact.id).where(
+            EventSecurityImpact.event_id == event.id,
+        ).limit(1)) is not None
+        invalidate_event_analysis(session, [event.id], "纳入的社交证据已变化，请重新核对")
+        if not has_analysis:
+            event.status = "pending"
         event.error = None
         session.flush()
         return event.id
 
-    def _screen_new_post(
-        self, session: Session, post: XPost, account: XAccount
+    def _apply_screening(
+        self, session: Session, post: XPost, account: XAccount,
+        payload: XPostScreeningPayload,
     ) -> int | None:
-        try:
-            payload = self.screener.screen(post, account)
-        except Exception as exc:
-            post.screening_status = "review"
-            post.screening = {"error": f"{type(exc).__name__}: {exc}"[:1000]}
-            return None
         post.screening = payload.model_dump()
         if (post.raw_data or {}).get("is_truncated"):
             post.screening_status = "review"
@@ -808,8 +837,7 @@ class XIngestionService:
         post.screening_status = "review"
         return None
 
-    def execute(self) -> set[int]:
-        queued_events: set[int] = set()
+    def execute(self, *, screen_posts: bool = True) -> set[int]:
         failed_accounts = 0
         if isinstance(self.fetcher, ResilientXFetcher):
             self.fetcher.begin_run()
@@ -823,7 +851,6 @@ class XIngestionService:
             if not accounts:
                 raise RuntimeError("X 采集未运行：没有启用的博主账号，请先在博主配置中启用账号。")
             for account in accounts:
-                account_events: set[int] = set()
                 health = self._health(session, account)
                 health.last_attempt_at = utc_now()
                 try:
@@ -835,15 +862,7 @@ class XIngestionService:
                         and item.published_at >= cutoff
                     ]
                     for item in accepted:
-                        post, created = self._upsert_post(session, account, item)
-                        needs_screening = created or (
-                            post.screening_status in {"pending", "review"}
-                            and (not post.screening or "error" in post.screening)
-                        )
-                        if needs_screening and (
-                            event_id := self._screen_new_post(session, post, account)
-                        ):
-                            account_events.add(event_id)
+                        self._upsert_post(session, account, item)
                     health.last_success_at = utc_now()
                     health.coverage = getattr(self.fetcher, "coverage", "curated")
                     health.last_error = None
@@ -851,7 +870,6 @@ class XIngestionService:
                     health.items_last_run = len(accepted)
                 except Exception as exc:
                     failed_accounts += 1
-                    account_events.clear()
                     session.rollback()
                     health = self._health(session, account)
                     health.last_attempt_at = utc_now()
@@ -859,12 +877,78 @@ class XIngestionService:
                     health.consecutive_failures = (health.consecutive_failures or 0) + 1
                     health.items_last_run = 0
                 session.commit()
-                queued_events.update(account_events)
         if failed_accounts == len(accounts):
             raise RuntimeError(
                 f"X 采集失败：{failed_accounts}/{len(accounts)} 个账号失败；"
                 "请查看运行状态中的错误原因。"
             )
+        return self.screen_pending() if screen_posts else set()
+
+    def screen_pending(self) -> set[int]:
+        queued_events: set[int] = set()
+        with self.session_factory() as session:
+            post_ids = session.scalars(
+                select(XPost.id)
+                .join(XPost.account)
+                .where(
+                    XAccount.active.is_(True),
+                    XPost.screening_status.in_(["pending", "review"]),
+                )
+                .order_by(XPost.published_at.desc(), XPost.id.desc())
+            ).all()
+        for post_id in post_ids:
+            with self.session_factory() as session:
+                post = session.scalar(
+                    select(XPost).where(XPost.id == post_id)
+                    .options(selectinload(XPost.account))
+                )
+                if post is None or not post.account.active:
+                    continue
+                if post.screening_status not in {"pending", "review"}:
+                    continue
+                if post.screening and "error" not in post.screening:
+                    continue
+                account = post.account
+                version = post.screening_version
+                session.expunge_all()
+
+            # No database transaction is held while the model is responding.
+            payload = None
+            error = None
+            try:
+                payload = self.screener.screen(post, account)
+            except Exception as exc:
+                error = f"筛选失败：{type(exc).__name__}，稍后重试"
+
+            with self.session_factory() as session:
+                claimed = session.scalar(
+                    update(XPost).where(
+                        XPost.id == post_id,
+                        XPost.screening_version == version,
+                        XPost.screening_status.in_(["pending", "review"]),
+                        XPost.account_id.in_(select(XAccount.id).where(
+                            XAccount.active.is_(True),
+                            XAccount.account_type == account.account_type,
+                        )),
+                    ).values(screening_version=version + 1)
+                    .returning(XPost.id).execution_options(synchronize_session=False)
+                )
+                if claimed is None:
+                    continue
+                current = session.scalar(
+                    select(XPost).where(XPost.id == post_id)
+                    .options(selectinload(XPost.account))
+                )
+                assert current is not None
+                event_id = None
+                if payload is None:
+                    current.screening_status = "review"
+                    current.screening = {"error": error}
+                else:
+                    event_id = self._apply_screening(session, current, current.account, payload)
+                session.commit()
+                if event_id is not None:
+                    queued_events.add(event_id)
         return queued_events
 
     def apply_decision(
@@ -874,10 +958,19 @@ class XIngestionService:
         decision: str,
         event_id: int | None = None,
     ) -> int | None:
+        # Serialize the manual decision with automatic promotion and invalidate in-flight work.
+        claimed = session.scalar(
+            update(XPost).where(XPost.id == post_id)
+            .values(screening_version=XPost.screening_version + 1)
+            .returning(XPost.id).execution_options(synchronize_session=False)
+        )
+        if claimed is None:
+            raise LookupError("帖子不存在")
         post = session.scalar(
             select(XPost)
             .where(XPost.id == post_id)
             .options(selectinload(XPost.account))
+            .execution_options(populate_existing=True)
         )
         if post is None:
             raise LookupError("帖子不存在")
@@ -919,6 +1012,8 @@ class XIngestionService:
                     )
                 else:
                     event.status = "pending"
+        if affected_event_id is not None:
+            invalidate_event_analysis(session, [affected_event_id], "人工调整了事件证据")
         session.flush()
         return affected_event_id
 

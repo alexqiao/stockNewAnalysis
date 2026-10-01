@@ -5,6 +5,14 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from trade_news_analysis import (  # noqa: F401
+    daily_bar_models,
+    decision_models,
+    holding_models,
+    research_data_models,
+    risk_models,
+    workflow_models,
+)
 from trade_news_analysis.config import get_settings
 from trade_news_analysis.models import Base
 

@@ -141,7 +141,7 @@ def batch_social_context(
             EventSecurityImpact.security_id.in_(targets),
             EventSecurityImpact.is_current.is_(True),
             EventSecurityImpact.status == "complete",
-            Event.status == "complete",
+            Event.status.in_(["complete", "partial"]),
         )
         .options(
             selectinload(EventSecurityImpact.theme_links).selectinload(

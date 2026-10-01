@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
-from .config import OPPORTUNITY_ASSET_SYMBOLS
+from .config import OPPORTUNITY_ASSET_SYMBOLS, Settings
+from .daily_bars_api import queue_daily_bar_refresh
 from .models import (
     Article,
     Event,
@@ -38,7 +40,12 @@ from .schemas import (
     XPostDecision,
 )
 from .services import opportunities as opportunity_service
+from .services.calendar_context import add_calendar_tasks
 from .services.coordinator import PipelineBusyError, PipelineCoordinator
+from .services.decision_policy import build_decision_layers, extend_action_plan
+from .services.event_reaction import event_price_reaction
+from .services.evidence import assess_event
+from .services.holdings import HOLDINGS_LOCK, effective_facts, read_holdings
 from .services.judgment import build_watchlist_judgment
 from .services.metrics import build_metrics
 from .services.pe_analysis import (
@@ -49,9 +56,14 @@ from .services.pe_analysis import (
     record_refresh_error,
 )
 from .services.providers import lookup_security_record
+from .services.research_inputs import load_research_inputs
 from .services.research_quality import company_data_quality
+from .services.research_workflow import read_action_plan
+from .services.risk import build_risk_plan, get_risk_inputs
 from .services.scoring import DIRECTION_SIGN, event_is_available
 from .services.social_context import batch_social_context, collection_status
+from .services.source_health import describe_source
+from .workflow_models import XClaim
 
 api_router = APIRouter(prefix="/api/v1")
 web_router = APIRouter()
@@ -201,6 +213,9 @@ def _impact_dict(impact: EventSecurityImpact) -> dict[str, Any]:
         "falsifiers": impact.falsifiers,
         "evidence": impact.evidence,
         "error": impact.error,
+        "evidence_version": impact.evidence_version,
+        "evidence_rule_version": impact.evidence_rule_version,
+        "is_current": impact.is_current,
     }
 
 
@@ -214,10 +229,24 @@ def _event_query() -> Any:
 
 def _event_dict(event: Event) -> dict[str, Any]:
     impacts = [item for item in event.impacts if item.is_current]
+    evidence = assess_event(event)
     return {
         "id": event.id,
         "event_key": event.event_key,
         "status": event.status,
+        "analysis_attempts": event.analysis_attempts,
+        "analysis_stage": event.analysis_stage,
+        "analysis_next_retry_at": event.analysis_next_retry_at,
+        "analysis_stale": event.analysis_stale,
+        "analysis_stale_reason": event.analysis_stale_reason,
+        "evidence_version": event.evidence_version,
+        "analyzed_evidence_version": event.analyzed_evidence_version,
+        "evidence_counts": {
+            "reports": evidence.report_count, "report_sources": evidence.report_sources,
+            "original_sources": evidence.original_sources,
+            "unknown_original_sources": evidence.unknown_original_sources,
+            "rule_version": evidence.rule_version,
+        },
         "title": event.title,
         "summary": event.summary,
         "event_type": event.event_type,
@@ -227,6 +256,10 @@ def _event_dict(event: Event) -> dict[str, Any]:
         "evidence_score": event.evidence_score,
         "missing_proof": event.missing_proof,
         "occurred_at": event.occurred_at,
+        "first_disclosed_at": event.first_disclosed_at,
+        "fact_time_verified": event.fact_time_verified,
+        "financial_period": event.financial_period,
+        "fact_source_url": event.fact_source_url,
         "updated_at": event.updated_at,
         "themes": [
             {"id": link.theme.id, "slug": link.theme.slug, "name": link.theme.name}
@@ -243,6 +276,7 @@ def _event_dict(event: Event) -> dict[str, Any]:
                 "evidence_role": link.article.evidence_role,
                 "author_handle": link.article.author_handle,
                 "analysis_eligible": link.article.analysis_eligible,
+                "original_source_url": link.article.original_source_url,
             }
             for link in event.article_links
         ],
@@ -338,6 +372,18 @@ def _research_context(
     holdings: dict[int, str],
     horizon: int = 5,
 ) -> dict[int, dict[str, Any]]:
+    return build_research_context(
+        session, request.app.state.settings, securities, holdings, horizon
+    )
+
+
+def build_research_context(
+    session: Session,
+    settings: Settings,
+    securities: list[Security],
+    holdings: dict[int, str],
+    horizon: int = 5,
+) -> dict[int, dict[str, Any]]:
     """Use the same current evidence and decision rules on every stock surface."""
     if horizon not in VALID_HORIZONS:
         raise HTTPException(status_code=422, detail="horizon 只能是 1、5 或 20")
@@ -346,6 +392,12 @@ def _research_context(
         return {}
     now = datetime.now(UTC)
     snapshots = {h: _latest_snapshot_map(session, h, ids) for h in sorted(VALID_HORIZONS)}
+    broker_holdings = read_holdings(session, now)
+    if broker_holdings["active"]:
+        holdings = {
+            security_id: effective_facts(broker_holdings, security_id)["holding_status"]
+            for security_id in ids
+        }
     impacts = session.scalars(
         select(EventSecurityImpact)
         .where(
@@ -355,15 +407,11 @@ def _research_context(
         )
         .options(selectinload(EventSecurityImpact.event))
     ).all()
-    current = {
-        security_id: {
-            item.event_id: item for item in impacts
-            if item.security_id == security_id
-            and event_is_available(item.event, now)
-        }
-        for security_id in ids
-    }
-    settings = request.app.state.settings
+    current: dict[int, dict[int, EventSecurityImpact]] = defaultdict(dict)
+    for item in impacts:
+        if event_is_available(item.event, now):
+            current[item.security_id][item.event_id] = item
+    inputs = load_research_inputs(session, securities, impacts, broker_holdings, now)
     social = batch_social_context(
         session, sorted(ids), now=now, enabled=settings.x_browser_enabled,
         stale_after_hours=settings.x_fetch_interval_hours * 2,
@@ -380,37 +428,81 @@ def _research_context(
                 invalidated.append(h)
                 signal = None
             signals[str(h)] = signal
-        pe = analysis_response(security, security.pe_analysis_profile, now=now)["summary"]
+        pe = analysis_response(security, inputs.pe_profiles.get(security.id), now=now)["summary"]
         titles = {event_id: item.event.title for event_id, item in current[security.id].items()}
+        checks: dict[int, dict[str, Any]] = {
+            event_id: {
+                "event_id": event_id, "title": item.event.title,
+                "status": item.event.status,
+                "occurred_at": item.event.first_disclosed_at or item.event.occurred_at,
+                "first_disclosed_at": item.event.first_disclosed_at,
+                "fact_time_verified": item.event.fact_time_verified,
+                "catalysts": item.catalysts, "risks": item.risks,
+                "falsifiers": item.falsifiers, "missing_proof": item.event.missing_proof,
+                "directions": {
+                    str(h): value.get("direction", "neutral")
+                    for h, value in (item.impacts or {}).items() if isinstance(value, dict)
+                },
+            }
+            for event_id, item in current[security.id].items()
+        }
         judgments = {
             str(h): build_watchlist_judgment(
                 signals[str(h)], pe, titles,
                 holding_status=holdings.get(security.id, "unknown"),
                 signals_by_horizon=signals, social_context=social[security.id], now=now,
+                event_checks=list(checks.values()), horizon=h,
             )
             for h in sorted(VALID_HORIZONS)
         }
+        market_research = inputs.market[security.id]
+        for check in checks.values():
+            check["price_reaction"] = event_price_reaction(
+                check["first_disclosed_at"], bool(check["fact_time_verified"]),
+                market_research, horizon,
+            )
+        risk_inputs = get_risk_inputs(session, security.id, now=now, preloaded=inputs.risk)
+        risk_plans = {
+            str(h): build_risk_plan(
+                session, security.id, horizon=h, now=now,
+                market_data=market_research, risk_inputs=risk_inputs,
+            )
+            for h in sorted(VALID_HORIZONS)
+        }
+        for h in sorted(VALID_HORIZONS):
+            judgment = judgments[str(h)]
+            judgment["strategy"] = build_decision_layers(
+                signals[str(h)], pe, list(checks.values()), market_research, risk_plans[str(h)],
+                holding_status=holdings.get(security.id, "unknown"), horizon=h, now=now,
+                market_name=security.market,
+            )
+            judgment["action"]["plan"] = read_action_plan(
+                session, security.id, h,
+                add_calendar_tasks(
+                    session, security.id, security.market,
+                    extend_action_plan(
+                        judgment["action"]["plan"], judgment["strategy"],
+                        list(checks.values()), risk_plans[str(h)],
+                        now=now, market_name=security.market,
+                    ), now, records=inputs.calendars[security.id],
+                ), now=now, preloaded=inputs.actions,
+            )
         selected = signals[str(horizon)]
         evidence_ids = selected["evidence_event_ids"] if selected else []
         result[security.id] = {
             "holding_status": holdings.get(security.id, "unknown"),
+            "holdings_source": risk_plans[str(horizon)]["inputs"]["holdings_source"],
             "pe_analysis": pe,
             "signals": signals,
             "signal": selected,
             "judgments": judgments,
             "judgment": judgments[str(horizon)],
+            "market_research": market_research,
+            "risk_plans": risk_plans,
+            "risk_plan": risk_plans[str(horizon)],
             "social": social[security.id],
             "invalidated_horizons": invalidated,
-            "event_checks": [
-                {
-                    "event_id": event_id, "title": current[security.id][event_id].event.title,
-                    "catalysts": current[security.id][event_id].catalysts,
-                    "risks": current[security.id][event_id].risks,
-                    "falsifiers": current[security.id][event_id].falsifiers,
-                    "missing_proof": current[security.id][event_id].event.missing_proof,
-                }
-                for event_id in evidence_ids
-            ],
+            "event_checks": [checks[event_id] for event_id in evidence_ids],
         }
     return result
 
@@ -701,24 +793,14 @@ def list_securities(
             query = query.where(
                 Security.name.ilike(f"%{q}%") | Security.symbol.ilike(f"%{q}%")
             )
-        securities = list(
-            session.scalars(
-                query.order_by(Security.market, Security.symbol).limit(limit * 5)
-            )
-        )
         if q:
             expected = q.casefold()
-            securities.sort(
-                key=lambda item: (
-                    0
-                    if item.symbol.casefold() == expected
-                    or item.name.casefold() == expected
-                    else 1,
-                    item.market,
-                    item.symbol,
-                )
-            )
-        return [_security_brief(item) for item in securities[:limit]]
+            query = query.order_by(case((
+                or_(func.lower(Security.symbol) == expected, func.lower(Security.name) == expected),
+                0,
+            ), else_=1))
+        securities = session.scalars(query.order_by(Security.market, Security.symbol).limit(limit))
+        return [_security_brief(item) for item in securities]
 
 
 @api_router.get("/securities/{security_id}")
@@ -730,7 +812,6 @@ def get_security(security_id: int, request: Request, horizon: int = 5) -> dict[s
             .options(
                 selectinload(Security.impacts).selectinload(EventSecurityImpact.event),
                 selectinload(Security.watchlist_entry),
-                selectinload(Security.pe_analysis_profile),
             )
         )
         if security is None:
@@ -750,6 +831,11 @@ def get_security(security_id: int, request: Request, horizon: int = 5) -> dict[s
             "timezone": security.timezone,
             "calendar": security.calendar,
             "watchlisted": security.watchlist_entry is not None,
+            "reanalysis_events": list({
+                item.event_id: {"id": item.event_id, "title": item.event.title,
+                                "reason": item.event.analysis_stale_reason}
+                for item in security.impacts if item.event.analysis_stale
+            }.values()),
             **context,
             "impacts": [
                 {**_impact_dict(item), "event_title": item.event.title}
@@ -883,6 +969,15 @@ def get_event(event_id: int, request: Request) -> dict[str, Any]:
         if event is None:
             raise HTTPException(status_code=404, detail="事件不存在")
         result = _event_dict(event)
+        inputs_by_id = {item.id: item.research_inputs for item in event.impacts}
+        for item in result["impacts"]:
+            item["research_inputs"] = inputs_by_id[item["id"]]
+        result["analysis_history"] = [
+            {**_impact_dict(item), "research_inputs": item.research_inputs,
+             "created_at": item.created_at}
+            for item in sorted(event.impacts, key=lambda value: value.id, reverse=True)
+            if not item.is_current
+        ][:20]
         social_posts = session.scalars(
             select(XPost)
             .where(XPost.related_event_id == event_id)
@@ -899,11 +994,31 @@ def reanalyze_event(event_id: int, request: Request) -> dict[str, Any]:
         event = session.get(Event, event_id)
         if event is None:
             raise HTTPException(status_code=404, detail="事件不存在")
-        event.status = "pending"
-        event.error = None
-        session.commit()
-    _coordinator(request).submit_analysis(event_id)
+    try:
+        _coordinator(request).submit_analysis(event_id)
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"event_id": event_id, "status": "queued"}
+
+
+@api_router.post("/research/validation/{snapshot_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+def retry_validation(snapshot_id: int, request: Request) -> dict[str, Any]:
+    from .services.action_evaluation import retry_action_validation
+
+    with _session(request) as session:
+        try:
+            result = retry_action_validation(session, snapshot_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        session.commit()
+    try:
+        _coordinator(request).submit_evaluation()
+    except PipelineBusyError:
+        return {**result, "dispatch": "deferred",
+                "message": "后台繁忙，已保留待验证状态，下次验证任务将继续处理。"}
+    return {**result, "dispatch": "queued", "message": "已提交验证任务。"}
 
 
 @api_router.get("/news")
@@ -931,32 +1046,23 @@ def list_news(
         )
         if source:
             query = query.where(Article.source.ilike(f"%{source}%"))
-        articles = session.scalars(query.limit(limit * 5)).unique().all()
-        result = [_article_dict(item) for item in articles]
         if symbol:
-            expected = symbol.upper()
-            result = [
-                item
-                for item in result
-                if any(
-                    security["symbol"].upper() == expected
-                    for event in item["events"]
-                    for security in event["securities"]
+            query = query.where(Article.event_links.any(EventArticle.event.has(
+                Event.impacts.any(
+                    EventSecurityImpact.is_current.is_(True)
+                    & EventSecurityImpact.security.has(
+                        func.upper(Security.symbol) == symbol.upper()
+                    )
                 )
-            ]
+            )))
         if direction:
-            article_ids = {
-                link.article_id
-                for impact in session.scalars(
-                    select(EventSecurityImpact).where(EventSecurityImpact.is_current.is_(True))
-                )
-                if any(
-                    value.get("direction") == direction for value in impact.impacts.values()
-                )
-                for link in impact.event.article_links
-            }
-            result = [item for item in result if item["id"] in article_ids]
-        return result[:limit]
+            query = query.where(Article.event_links.any(EventArticle.event.has(
+                Event.impacts.any(EventSecurityImpact.is_current.is_(True) & or_(*(
+                    EventSecurityImpact.impacts[str(h)]["direction"].as_string() == direction
+                    for h in sorted(VALID_HORIZONS)
+                )))
+            )))
+        return [_article_dict(item) for item in session.scalars(query.limit(limit)).unique()]
 
 
 @api_router.get("/news/{article_id}")
@@ -1021,6 +1127,24 @@ def update_x_account(
         return _x_account_dict(account)
 
 
+@api_router.delete("/x/accounts/{account_id}")
+def delete_x_account(account_id: int, request: Request) -> dict[str, Any]:
+    with _session(request) as session:
+        account = session.get(XAccount, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="X 账号不存在")
+        # Preserve saved research even when SQLite foreign-key enforcement is disabled.
+        session.execute(
+            update(XClaim)
+            .where(XClaim.post_id.in_(select(XPost.id).where(XPost.account_id == account_id)))
+            .values(post_id=None)
+        )
+        session.execute(delete(SourceHealth).where(SourceHealth.source == f"X:@{account.handle}"))
+        session.delete(account)
+        session.commit()
+        return {"deleted": True, "account_id": account_id}
+
+
 @api_router.get("/x/posts")
 def list_x_posts(
     request: Request,
@@ -1044,14 +1168,9 @@ def list_x_posts(
             query = query.where(XPost.screening_status.in_(["ignore", "ignored"]))
         elif screening_status:
             query = query.where(XPost.screening_status == screening_status)
-        posts = session.scalars(query.limit(limit * 3)).all()
         if classification:
-            posts = [
-                item
-                for item in posts
-                if str((item.screening or {}).get("classification")) == classification
-            ]
-        return [_x_post_dict(item) for item in posts[:limit]]
+            query = query.where(XPost.screening["classification"].as_string() == classification)
+        return [_x_post_dict(item) for item in session.scalars(query.limit(limit))]
 
 
 @api_router.post("/x/posts/{post_id}/decision")
@@ -1072,9 +1191,43 @@ def decide_x_post(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         session.commit()
+        if event_id is not None:
+            from .services.scoring import rebuild_signal_snapshots
+
+            rebuild_signal_snapshots(session)
+        event = session.get(Event, event_id) if event_id is not None else None
+        affected_status = event.status if event else None
+    result: dict[str, Any] = {
+        "post_id": post_id, "decision": payload.decision, "event_id": event_id,
+        "analysis_status": "not_required", "message": "人工决定已保存。",
+    }
     if event_id is not None:
-        coordinator.submit_analysis(event_id)
-    return {"post_id": post_id, "decision": payload.decision, "event_id": event_id}
+        if affected_status == "excluded":
+            result["message"] = "人工决定已保存；事件已无有效证据，旧分析已退出当前判断。"
+            return result
+        if payload.decision != "promote":
+            result.update(analysis_status="reanalysis_required", message=(
+                f"人工决定已保存；依据已变化，请到事件 #{event_id} 核对后点击“重新分析”。"
+            ))
+            return result
+        try:
+            coordinator.submit_analysis(event_id)
+        except PipelineBusyError:
+            result.update(
+                analysis_status="pending",
+                message=(f"人工决定已保存；后台正忙，关联事件待分析。请稍后到事件 #{event_id} "
+                         "点击“重新分析”。"),
+            )
+        else:
+            result.update(
+                analysis_status="queued", message="人工决定已保存，关联事件分析已排队。",
+            )
+    return result
+
+
+@api_router.get("/runs/x-ingest/status")
+def x_ingestion_status(request: Request) -> dict[str, str]:
+    return {"status": _coordinator(request).x_status}
 
 
 @api_router.post("/runs/x-ingest", status_code=status.HTTP_202_ACCEPTED)
@@ -1113,9 +1266,7 @@ def get_watchlist(request: Request, horizon: int = 5) -> list[dict[str, Any]]:
     with _session(request) as session:
         items = session.scalars(
             select(Watchlist)
-            .options(
-                selectinload(Watchlist.security).selectinload(Security.pe_analysis_profile)
-            )
+            .options(selectinload(Watchlist.security))
             .order_by(Watchlist.position, Watchlist.id)
         ).all()
         context = _research_context(
@@ -1136,7 +1287,7 @@ def get_watchlist(request: Request, horizon: int = 5) -> list[dict[str, Any]]:
 
 @api_router.put("/watchlist")
 def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[str, Any]]:
-    with _session(request) as session:
+    with HOLDINGS_LOCK, _session(request) as session:
         resolved = [
             (_resolve_watchlist_security(session, item), item)
             for item in payload.items
@@ -1144,12 +1295,30 @@ def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[
         security_ids = [security.id for security, _ in resolved]
         if len(security_ids) != len(set(security_ids)):
             raise HTTPException(status_code=422, detail="自选证券不能重复")
+        previous_active = set(session.scalars(
+            select(Watchlist.security_id).where(Watchlist.active.is_(True))
+        ))
+        added_daily_ids = [
+            security.id for security, item in resolved
+            if item.active and security.market in {"US", "HK"}
+            and security.id not in previous_active
+        ]
         previous_holdings = {
             security_id: holding_status
             for security_id, holding_status in session.execute(
                 select(Watchlist.security_id, Watchlist.holding_status)
             )
         }
+        broker_holdings = read_holdings(session)
+        if broker_holdings["active"]:
+            for security, item in resolved:
+                broker_status = effective_facts(broker_holdings, security.id)["holding_status"]
+                if (
+                    "holding_status" in item.model_fields_set
+                    and item.holding_status != broker_status
+                ):
+                    raise HTTPException(409, "实际持仓由 IBKR 同步，不能手动覆盖持仓状态")
+                previous_holdings[security.id] = broker_status
         session.execute(delete(Watchlist))
         session.add_all(
             [
@@ -1166,6 +1335,7 @@ def replace_watchlist(payload: WatchlistReplace, request: Request) -> list[dict[
             ]
         )
         session.commit()
+    queue_daily_bar_refresh(request, added_daily_ids)
     return get_watchlist(request)
 
 
@@ -1174,14 +1344,24 @@ def health(request: Request) -> dict[str, Any]:
     semantic_clustering = _coordinator(request).ingestion.semantic_matcher.status()
     with _session(request) as session:
         sources = session.scalars(select(SourceHealth).order_by(SourceHealth.source)).all()
-        latest_run = session.scalar(select(IngestionRun).order_by(IngestionRun.id.desc()).limit(1))
-        broad_markets = {
+        runs = session.scalars(
+            select(IngestionRun).order_by(IngestionRun.id.desc()).limit(10)
+        ).all()
+        latest_run = runs[0] if runs else None
+        source_states = [describe_source(item, request.app.state.settings) for item in sources]
+        historical_markets = {
             market
             for item in sources
             if item.capability == "news" and item.coverage == "broad" and item.last_success_at
             for market in item.markets
         }
+        broad_markets = {
+            market for item in source_states
+            if item["capability"] == "news" and item["coverage"] == "broad"
+            and item["availability"] == "fresh" for market in item["markets"]
+        }
         return {
+            "service_status": "ok",
             "status": "ok" if broad_markets == VALID_MARKETS else "degraded",
             "coverage_warning": (
                 None
@@ -1190,6 +1370,10 @@ def health(request: Request) -> dict[str, Any]:
             ),
             "market_coverage": {
                 market: ("broad" if market in broad_markets else "partial")
+                for market in sorted(VALID_MARKETS)
+            },
+            "historical_market_coverage": {
+                market: ("broad" if market in historical_markets else "partial")
                 for market in sorted(VALID_MARKETS)
             },
             "llm_configured": request.app.state.settings.llm_configured,
@@ -1202,20 +1386,8 @@ def health(request: Request) -> dict[str, Any]:
             "latest_run": (
                 RunResponse.model_validate(latest_run).model_dump() if latest_run else None
             ),
-            "sources": [
-                {
-                    "source": item.source,
-                    "capability": item.capability,
-                    "markets": item.markets,
-                    "coverage": item.coverage,
-                    "last_attempt_at": item.last_attempt_at,
-                    "last_success_at": item.last_success_at,
-                    "last_error": item.last_error,
-                    "consecutive_failures": item.consecutive_failures,
-                    "items_last_run": item.items_last_run,
-                }
-                for item in sources
-            ],
+            "latest_runs": [RunResponse.model_validate(run).model_dump() for run in runs],
+            "sources": source_states,
         }
 
 
@@ -1347,10 +1519,29 @@ def metrics_page(
 
 @web_router.get("/watchlist", response_class=HTMLResponse)
 def watchlist_page(request: Request) -> HTMLResponse:
+    with _session(request) as session:
+        holdings = read_holdings(session)
+        now = datetime.now(UTC)
+        entries = session.scalars(select(Watchlist).options(
+            selectinload(Watchlist.security).selectinload(Security.pe_analysis_profile),
+        ).order_by(Watchlist.position, Watchlist.id)).all()
+        items = [{
+            "security_id": item.security_id,
+            "active": item.active,
+            "position": item.position,
+            "security": _security_brief(item.security),
+            "holding_status": (
+                effective_facts(holdings, item.security_id)["holding_status"]
+                if holdings["active"] else item.holding_status
+            ),
+            "pe_analysis": analysis_response(
+                item.security, item.security.pe_analysis_profile, now=now,
+            )["summary"],
+        } for item in entries]
     return request.app.state.templates.TemplateResponse(
         request=request,
         name="watchlist.html",
-        context={"items": get_watchlist(request)},
+        context={"items": items, "holdings": holdings},
     )
 
 

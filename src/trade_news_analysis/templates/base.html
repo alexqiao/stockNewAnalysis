@@ -1,10 +1,12 @@
+{# Bump this version when changing the bundled stylesheet or daily chart script. #}
+{% set asset_version = "20261001-1" %}
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}股票事件研究{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ asset_version }}">
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +15,7 @@
       <a href="/">机会与标的</a>
       <a href="/metrics">验证看板</a>
       <a href="/watchlist">自选股</a>
+      <a href="/research">研究工作台</a>
       <a href="/x">博主动态</a>
       <a href="/status">运行状态</a>
       <a href="/docs">API</a>
@@ -22,6 +25,8 @@
     {% block content %}{% endblock %}
   </main>
   <footer>新闻是证据，不是结论。仅供研究与教育使用，不构成投资建议。</footer>
+  <script src="/static/poller.js?v={{ asset_version }}" defer></script>
+  <script src="/static/workflow.js?v={{ asset_version }}" defer></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

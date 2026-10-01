@@ -2,14 +2,15 @@
 {% block title %}自选股 · 股票事件研究{% endblock %}
 {% block content %}
 <section class="page-heading"><p class="eyebrow">WATCHLIST</p><h1>管理自选股</h1><p class="lead">直接输入 A 股、港股或美股的代码/公司名称。选择市场可以避免同名或同代码歧义。</p></section>
+{% include "_holdings.html" %}
 <section class="analysis-panel">
   <table id="watchlist-table"><thead><tr><th>排序</th><th>市场</th><th>代码或公司名称</th><th>PE 估值</th><th>持仓状态</th><th>启用</th><th></th></tr></thead><tbody>
   {% for item in items %}<tr>
     <td><div class="order-controls"><button type="button" class="move-up secondary" aria-label="上移">↑</button><button type="button" class="move-down secondary" aria-label="下移">↓</button></div></td>
     <td><select data-field="market"><option value="">自动识别</option>{% for market in ["A", "HK", "US"] %}<option value="{{ market }}" {% if market == item.security.market %}selected{% endif %}>{{ {"A": "A股", "HK": "港股", "US": "美股"}[market] }}</option>{% endfor %}</select></td>
-    <td><div class="security-picker"><input type="hidden" data-field="security_id" value="{{ item.security_id }}"><input type="text" data-field="query" value="{{ item.security.symbol }}" placeholder="如 AAPL、00700.HK、贵州茅台" autocomplete="off"><div class="selected-security">{{ item.security.market }} · {{ item.security.symbol }} · {{ item.security.name }}</div><div class="search-results hidden"></div></div></td>
+    <td><div class="security-picker"><input type="hidden" data-field="security_id" value="{{ item.security_id }}"><input type="text" data-field="query" value="{{ item.security.symbol }}" placeholder="如 AAPL、00700.HK、贵州茅台" autocomplete="off"><div class="selected-security">{{ item.security.market }} · {{ item.security.symbol }} · {{ item.security.name }}</div><div class="search-results hidden"></div></div>{% if item.security.market in ["US", "HK"] %}<a class="daily-bars-link" href="/securities/{{ item.security_id }}#daily-bars">行情/K线</a>{% endif %}</td>
     <td class="pe-summary">{% if item.pe_analysis.status == "ready" and item.pe_analysis.price_low is not none %}<a href="/securities/{{ item.security_id }}#pe-analysis"><strong>{{ item.pe_analysis.valuation_label }} · {{ item.pe_analysis.valuation_year }}</strong><span>{{ item.pe_analysis.year }} 目标 {{ "%.2f"|format(item.pe_analysis.price_low) }}–{{ "%.2f"|format(item.pe_analysis.price_high) }}</span><span>CAGR {{ "%.1f"|format(item.pe_analysis.cagr_low * 100) }}%–{{ "%.1f"|format(item.pe_analysis.cagr_high * 100) }}%</span></a>{% else %}<a href="/securities/{{ item.security_id }}#pe-analysis">待填写估值假设</a>{% endif %}</td>
-    <td><select data-field="holding_status" aria-label="持仓状态">{% for value, label in [("unknown", "未填写"), ("flat", "未持仓"), ("long", "已持仓")] %}<option value="{{ value }}" {% if value == item.holding_status %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+    <td><select data-field="holding_status" aria-label="持仓状态" {% if holdings.active %}disabled{% endif %}>{% for value, label in [("unknown", "未填写"), ("flat", "未持仓"), ("long", "已持仓"), ("short", "空头持仓")] %}<option value="{{ value }}" {% if value == item.holding_status %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
     <td><input type="checkbox" data-field="active" {% if item.active %}checked{% endif %}></td><td><button type="button" class="remove secondary">删除</button></td>
   </tr>{% endfor %}
   </tbody></table>
@@ -21,7 +22,7 @@
   <td><select data-field="market"><option value="">自动识别</option><option value="A">A股</option><option value="HK">港股</option><option value="US">美股</option></select></td>
   <td><div class="security-picker"><input type="hidden" data-field="security_id"><input type="text" data-field="query" placeholder="如 AAPL、00700.HK、贵州茅台" autocomplete="off"><div class="selected-security muted">输入后可从匹配结果中选择，也可直接保存精确代码。</div><div class="search-results hidden"></div></div></td>
   <td class="pe-summary muted">保存后可填写估值假设</td>
-  <td><select data-field="holding_status" aria-label="持仓状态"><option value="unknown">未填写</option><option value="flat">未持仓</option><option value="long">已持仓</option></select></td>
+  <td><select data-field="holding_status" aria-label="持仓状态" {% if holdings.active %}disabled{% endif %}><option value="unknown">未填写</option><option value="flat">未持仓</option><option value="long">已持仓</option></select></td>
   <td><input type="checkbox" data-field="active" checked></td><td><button type="button" class="remove secondary">删除</button></td>
 </tr></template>
 {% endblock %}
@@ -86,16 +87,51 @@ tbody.querySelectorAll('tr').forEach(bindRow);
 refreshOrderButtons();
 document.getElementById('add').onclick = function () { const fragment = document.getElementById('row-template').content.cloneNode(true); const row = fragment.querySelector('tr'); tbody.appendChild(fragment); bindRow(row); refreshOrderButtons(); const input = row.querySelector('[data-field="query"]'); input.focus(); };
 document.getElementById('save').onclick = async function () {
+  if (this.disabled) return;
   const items = Array.from(tbody.querySelectorAll('tr')).map(function (row) {
     const id = row.querySelector('[data-field="security_id"]').value;
     const market = row.querySelector('[data-field="market"]').value;
-    const item = {active: row.querySelector('[data-field="active"]').checked, holding_status: row.querySelector('[data-field="holding_status"]').value};
+    const item = {active: row.querySelector('[data-field="active"]').checked};
+    const holding = row.querySelector('[data-field="holding_status"]');
+    if (!holding.disabled) item.holding_status = holding.value;
     if (id) item.security_id = Number(id); else { item.query = row.querySelector('[data-field="query"]').value.trim(); if (market) item.market = market; }
     return item;
   });
-  const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})});
-  const message = document.getElementById('message'); message.classList.remove('hidden');
-  if (response.ok) { message.textContent = '已保存。'; window.setTimeout(function () { window.location.reload(); }, 400); }
-  else { const error = await response.json(); message.textContent = '保存失败：' + (error.detail || JSON.stringify(error)); }
+  const save = this;
+  const add = document.getElementById('add');
+  const table = document.getElementById('watchlist-table');
+  const message = document.getElementById('message');
+  save.disabled = true;
+  add.disabled = true;
+  table.inert = true;
+  message.classList.remove('hidden');
+  message.textContent = '正在保存…';
+  document.dispatchEvent(new Event('watchlist-saving'));
+  let saved = false;
+  try {
+    const response = await fetch('/api/v1/watchlist', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})});
+    if (!response.ok) {
+      let detail = '服务器返回 HTTP ' + response.status;
+      try {
+        const error = await response.json();
+        detail = Array.isArray(error.detail) ? error.detail.map(item => item.msg).join('；') : error.detail || detail;
+      } catch (_) { /* A proxy can return an HTML error page. */ }
+      throw new Error(detail);
+    }
+    saved = true;
+    document.dispatchEvent(new Event('watchlist-saved'));
+    message.textContent = '已保存，正在刷新…';
+    window.location.reload();
+  } catch (error) {
+    document.dispatchEvent(new Event('watchlist-save-failed'));
+    message.textContent = '保存失败：' + error.message;
+  } finally {
+    if (!saved) {
+      save.disabled = false;
+      add.disabled = false;
+      table.inert = false;
+      refreshOrderButtons();
+    }
+  }
 };
-</script>{% endblock %}
+</script><script src="/static/holdings.js" defer></script>{% endblock %}

@@ -18,8 +18,13 @@
   <div class="metric"><span>有效横截面</span><strong>{{ metrics.rank_ic_periods }}</strong></div>
 </div>
 {% if metrics.evidence == "insufficient" %}<div class="notice">有效样本少于 30 条或独立入场期少于 20 个，当前结果只用于记录，不能证明存在稳定优势。</div>{% endif %}
-<div class="notice">当前仅统计 {{ metrics.scoring_version }} 新口径快照；旧记录保留但不混入结果。同一证券、周期和实际入场日只保留入场前最后一个信号；Rank IC 按市场、周期和实际入场日计算横截面，ICIR 未年化。</div>
+<div class="notice">当前主统计使用 {{ metrics.scoring_version }} 决策分快照、{{ metrics.evaluation_version }} 验证口径及 {{ metrics.evidence_rule_version }} 证据规则，按交易所实际开收盘时间确定窗口；历史行情缺失时保持待验证。旧结果保留，按口径单独展示。同一证券、周期和实际入场日只保留入场前最后一个信号；Rank IC 按市场、周期和实际入场日计算横截面，ICIR 未年化。</div>
 <section class="analysis-panel"><h2>分市场</h2><table><thead><tr><th>市场</th><th>样本</th><th>命中率</th><th>平均超额收益</th><th>Rank IC</th><th>IC周期</th><th>A股涨停触及</th></tr></thead><tbody>
 {% for name, item in metrics.by_market.items() %}<tr><td>{{ name }}</td><td>{{ item.sample_size }}</td><td>{{ "%.1f"|format(item.hit_rate * 100) ~ "%" if item.hit_rate is not none else "—" }}</td><td>{{ "%.2f"|format(item.average_excess_return_pct) ~ "%" if item.average_excess_return_pct is not none else "—" }}</td><td>{{ "%.3f"|format(item.rank_ic_mean) if item.rank_ic_mean is not none else "—" }}</td><td>{{ item.rank_ic_periods }}</td><td>{{ "%.1f"|format(item.limit_up_hit_rate * 100) ~ "%" if item.limit_up_hit_rate is not none else "—" }}</td></tr>{% endfor %}
+</tbody></table></section>
+<section class="analysis-panel"><h2>按验证口径分别统计</h2>
+<p>历史口径可能使用顺延后的入场行情，仅供审计。每种验证口径继续按旧、新及混合证据规则分别统计，不合并或改写原记录。</p>
+<table><thead><tr><th>验证口径</th><th>证据规则</th><th>样本</th><th>独立入场期</th><th>命中率</th><th>平均超额收益</th></tr></thead><tbody>
+{% for version, group in metrics.by_evaluation_version.items() %}{% for rule, item in group.by_evidence_rule_version.items() %}<tr data-evaluation-version="{{ version }}" data-evidence-rule="{{ rule }}"><td>{{ version }}</td><td>{{ rule }}{% if version == metrics.evaluation_version and rule == metrics.evidence_rule_version %}（当前主统计）{% endif %}</td><td>{{ item.sample_size }}</td><td>{{ item.decision_periods }}</td><td>{{ "%.1f"|format(item.hit_rate * 100) ~ "%" if item.hit_rate is not none else "—" }}</td><td>{{ "%.2f"|format(item.average_excess_return_pct) ~ "%" if item.average_excess_return_pct is not none else "—" }}</td></tr>{% endfor %}{% endfor %}
 </tbody></table></section>
 {% endblock %}

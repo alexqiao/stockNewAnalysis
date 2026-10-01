@@ -7,10 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trade_news_analysis.models import Event, EventSecurityImpact, Security, SecuritySignalSnapshot
+from trade_news_analysis.services.evidence import EVIDENCE_RULE_VERSION
 from trade_news_analysis.services.scoring import (
     aggregate_security,
     calculate_opportunity_score,
     evidence_quality,
+    evidence_rule_version,
     freshness_decay,
     rebuild_signal_snapshots,
     summarize_components,
@@ -70,6 +72,8 @@ def test_opposing_events_create_high_conflict(session: Session) -> None:
             EventSecurityImpact(
                 event_id=event.id,
                 security_id=security.id,
+                evidence_rule_version=(EVIDENCE_RULE_VERSION if direction == "bullish"
+                                       else "legacy-v1"),
                 status="complete",
                 opportunity_score=80,
                 impacts={
@@ -89,6 +93,19 @@ def test_opposing_events_create_high_conflict(session: Session) -> None:
     assert snapshot.direction == "neutral"
     assert snapshot.score == 0
     assert snapshot.conflict == 1
+    assert snapshot.components["evidence_rule_version"] == "mixed:legacy-v1+original-sources-v2"
+    assert {item["evidence_rule_version"] for item in snapshot.components["events"]} == {
+        "legacy-v1", EVIDENCE_RULE_VERSION,
+    }
+
+
+def test_missing_evidence_rule_is_legacy_and_scoped_events_override_aggregate() -> None:
+    assert evidence_rule_version({}) == "legacy-v1"
+    assert evidence_rule_version({"events": [{"event_id": 1}]}) == "legacy-v1"
+    assert evidence_rule_version({
+        "evidence_rule_version": "mixed:legacy-v1+original-sources-v2",
+        "events": [{"evidence_rule_version": EVIDENCE_RULE_VERSION}],
+    }) == EVIDENCE_RULE_VERSION
 
 
 def test_single_event_score_decays_and_expires(session: Session) -> None:
@@ -215,7 +232,10 @@ def test_rebuild_clears_invalidated_evidence_once(
         assert snapshot.score == snapshot.confidence == snapshot.conflict == 0
         assert snapshot.rank is None
         assert snapshot.evidence_event_ids == []
-        assert snapshot.components == {"research_score": 0, "decision_score": 0, "events": []}
+        assert snapshot.components == {
+            "research_score": 0, "decision_score": 0, "events": [],
+            "evidence_rule_version": EVIDENCE_RULE_VERSION,
+        }
     assert rebuild_signal_snapshots(session, now + timedelta(minutes=20)) == []
     assert len(list(session.scalars(select(SecuritySignalSnapshot)))) == 6
 
@@ -233,7 +253,8 @@ def test_rebuild_ignores_later_inserted_older_snapshots(session: Session) -> Non
             security_id=security.id,
             horizon=5,
             as_of=now,
-            components={"research_score": 0, "decision_score": 0, "events": []},
+            components={"research_score": 0, "decision_score": 0, "events": [],
+                        "evidence_rule_version": EVIDENCE_RULE_VERSION},
         )
     )
     session.flush()

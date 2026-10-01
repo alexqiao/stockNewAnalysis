@@ -14,6 +14,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "apscheduler>=3.11,<4",
   "beautifulsoup4>=4.13,<5",
+  "exchange-calendars>=4.11,<5",
   "fastapi>=0.116,<1",
   "feedparser>=6.0.11,<7",
   "investormate==0.6.0",
@@ -23,9 +24,14 @@ dependencies = [
   "pydantic-settings>=2.10,<3",
   "sqlalchemy>=2.0.43,<3",
   "uvicorn[standard]>=0.35,<1",
+  "yfinance==0.2.66",
 ]
 
 [project.optional-dependencies]
+ibkr = [
+  # Runtime required by official TWS API 10.45.1; install ibapi from IBKR's bundle.
+  "protobuf==5.29.5",
+]
 data = [
   "akshare>=1.17,<2",
 ]
@@ -50,7 +56,7 @@ trade-news = "trade_news_analysis.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-trade_news_analysis = ["py.typed", "templates/*.html", "static/*.css"]
+trade_news_analysis = ["py.typed", "templates/*.html", "static/*.css", "static/*.js", "static/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

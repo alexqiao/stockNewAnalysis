@@ -5,9 +5,17 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, inspect, select
+from sqlalchemy import Engine, create_engine, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from . import (  # noqa: F401
+    daily_bar_models,
+    decision_models,
+    holding_models,
+    research_data_models,
+    risk_models,
+    workflow_models,
+)
 from .config import (
     DEFAULT_COMPANIES,
     DEFAULT_INDUSTRIES,
@@ -19,6 +27,38 @@ from .config import (
 from .models import Base, Security, Watchlist, XAccount
 
 SessionFactory = sessionmaker[Session]
+SCHEMA_REVISION = "e83f20a7b691"
+
+
+def check_database_compatibility(engine: Engine) -> str:
+    """Inspect before any create_all, seed, recovery or scheduler writes."""
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if not tables or tables == {"alembic_version"}:
+        if "alembic_version" in tables:
+            with engine.connect() as connection:
+                if connection.scalar(text("SELECT version_num FROM alembic_version")):
+                    raise RuntimeError("数据库版本存在但业务表缺失，请从备份恢复后再启动。")
+        return "empty"
+    missing = []
+    for name, table in Base.metadata.tables.items():
+        if name not in tables:
+            missing.append(name)
+        else:
+            columns = {column["name"] for column in inspector.get_columns(name)}
+            missing.extend(f"{name}.{column.name}" for column in table.columns
+                           if column.name not in columns)
+    revisions: list[str] = []
+    if "alembic_version" in tables:
+        with engine.connect() as connection:
+            revisions = list(connection.scalars(text("SELECT version_num FROM alembic_version")))
+    if missing or (revisions and revisions != [SCHEMA_REVISION]):
+        detail = "、".join(missing[:5]) if missing else "迁移版本与当前程序不一致"
+        raise RuntimeError(
+            f"数据库结构不兼容（{detail}）。请停止旧服务并备份数据库，执行 "
+            "uv run --no-sync alembic upgrade head 后重新启动；程序不会自动迁移。"
+        )
+    return "current" if revisions else "unversioned_compatible"
 
 
 def build_engine(database_url: str) -> Engine:
